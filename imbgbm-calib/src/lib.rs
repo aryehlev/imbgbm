@@ -303,6 +303,71 @@ fn calibrate_tree_inner(
     }
 }
 
+// ── PU label-frequency estimation (Elkan & Noto 2008) ────────────────────────
+
+/// Estimator type for the PU labeling rate `c = P(s=1 | y=1)`.
+#[derive(Clone, Copy, Debug)]
+pub enum PuPriorEstimator {
+    /// e1: mean predicted P(s=1|x) over held-out labeled positives. Most stable.
+    MeanOverPositives,
+    /// e2: 1 over the maximum predicted P(s=1|x) — sensitive to outliers.
+    MaxOverPositives,
+    /// e3: median predicted P(s=1|x) over labeled positives. Robust alternative.
+    MedianOverPositives,
+}
+
+/// Estimate the PU labeling rate `c = P(s=1 | y=1)` from out-of-fold predictions.
+///
+/// Inputs:
+///   `oof_scores` – out-of-fold P(s=1|x) for every training row.
+///   `labels`      – the observed labels (1 = labeled positive, 0 = unlabeled).
+///   `estimator`   – which of Elkan & Noto's three estimators to use.
+///
+/// Returns `c ∈ (0, 1]`. Under SCAR (selected completely at random), the true
+/// positive probability is `P(y=1|x) = P(s=1|x) / c`. Lower `c` → larger
+/// upward correction at inference.
+pub fn estimate_pu_label_rate(
+    oof_scores: &[f32],
+    labels: &[f32],
+    estimator: PuPriorEstimator,
+) -> f32 {
+    assert_eq!(oof_scores.len(), labels.len());
+    let pos_scores: Vec<f32> = oof_scores
+        .iter()
+        .zip(labels)
+        .filter(|(_, &y)| y > 0.5)
+        .map(|(&s, _)| s)
+        .collect();
+    if pos_scores.is_empty() {
+        return 1.0;
+    }
+    let c = match estimator {
+        PuPriorEstimator::MeanOverPositives => {
+            pos_scores.iter().sum::<f32>() / pos_scores.len() as f32
+        }
+        PuPriorEstimator::MaxOverPositives => {
+            pos_scores.iter().copied().fold(0.0f32, f32::max)
+        }
+        PuPriorEstimator::MedianOverPositives => {
+            let mut s = pos_scores.clone();
+            s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            s[s.len() / 2]
+        }
+    };
+    c.clamp(1e-3, 1.0)
+}
+
+/// Apply the Elkan-Noto class-prior correction to a predicted probability.
+///
+/// `P(y=1|x) = clip(P(s=1|x) / c, 0, 1)`
+///
+/// In practice the linear rescaling can push values above 1 in the tail —
+/// callers should `clamp(0, 1)` after applying.
+#[inline]
+pub fn pu_correct_probability(p_s_given_x: f32, c: f32) -> f32 {
+    (p_s_given_x / c.max(1e-3)).clamp(0.0, 1.0)
+}
+
 // ── Platt scaling on OOF boosted scores ──────────────────────────────────────
 
 /// Fit Platt scaling `(a, b)` minimising binary log-loss of

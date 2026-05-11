@@ -37,6 +37,11 @@ impl Dataset {
         Dataset { features, labels, n_rows, n_cols }
     }
 
+    /// Allocate a row-major copy of row `i`. O(n_cols).
+    pub fn row_copy(&self, i: usize) -> Vec<f32> {
+        (0..self.n_cols).map(|c| self.features[c][i]).collect()
+    }
+
     /// Return a view of the dataset restricted to the given row indices.
     pub fn subset(&self, indices: &[u32]) -> Dataset {
         let n_rows = indices.len();
