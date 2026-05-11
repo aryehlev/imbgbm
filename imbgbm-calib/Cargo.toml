@@ -1,0 +1,9 @@
+[package]
+name = "imbgbm-calib"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Out-of-fold leaf calibration for imbgbm"
+
+[dependencies]
+imbgbm-core.workspace = true

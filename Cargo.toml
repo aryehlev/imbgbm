@@ -1,0 +1,35 @@
+[workspace]
+members = [
+    "imbgbm-core",
+    "imbgbm-loss",
+    "imbgbm-sample",
+    "imbgbm-split",
+    "imbgbm-calib",
+    "imbgbm-train",
+    "imbgbm-infer",
+    "imbgbm-py",
+    "imbgbm-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/aryehlev/imbgbm"
+
+[workspace.dependencies]
+imbgbm-core   = { path = "imbgbm-core" }
+imbgbm-loss   = { path = "imbgbm-loss" }
+imbgbm-sample = { path = "imbgbm-sample" }
+imbgbm-split  = { path = "imbgbm-split" }
+imbgbm-calib  = { path = "imbgbm-calib" }
+imbgbm-train  = { path = "imbgbm-train" }
+imbgbm-infer  = { path = "imbgbm-infer" }
+rand          = { version = "0.8", features = ["small_rng"] }
+rayon         = "1.10"
+pyo3          = { version = "0.21", features = ["extension-module"] }
+clap          = { version = "4", features = ["derive"] }
+serde         = { version = "1", features = ["derive"] }
+serde_json    = "1"
+csv           = "1"

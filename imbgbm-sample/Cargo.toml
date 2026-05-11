@@ -1,0 +1,9 @@
+[package]
+name = "imbgbm-sample"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Adaptive sampling strategies for imbgbm: Uniform, GOSS, Adaptive"
+
+[dependencies]
+rand.workspace = true

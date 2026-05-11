@@ -1,0 +1,16 @@
+[package]
+name = "imbgbm-train"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Training orchestration for imbgbm"
+
+[dependencies]
+imbgbm-core.workspace   = true
+imbgbm-loss.workspace   = true
+imbgbm-sample.workspace = true
+imbgbm-split.workspace  = true
+imbgbm-calib.workspace  = true
+imbgbm-infer.workspace  = true
+rand.workspace  = true
+rayon.workspace = true

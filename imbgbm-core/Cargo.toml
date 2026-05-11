@@ -1,0 +1,10 @@
+[package]
+name = "imbgbm-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core data structures for imbgbm: Dataset, Histogram, Tree, BoostingState"
+
+[dependencies]
+serde = { workspace = true }
+

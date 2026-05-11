@@ -1,0 +1,17 @@
+[package]
+name = "imbgbm-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PyO3 Python bindings for imbgbm"
+
+[lib]
+name = "imbgbm"
+crate-type = ["cdylib"]
+
+[dependencies]
+imbgbm-train.workspace = true
+imbgbm-infer.workspace = true
+imbgbm-core.workspace  = true
+imbgbm-loss.workspace  = true
+pyo3.workspace = true

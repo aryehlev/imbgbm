@@ -1,0 +1,9 @@
+[package]
+name = "imbgbm-split"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Variance-aware histogram split finders for imbgbm"
+
+[dependencies]
+imbgbm-core.workspace = true

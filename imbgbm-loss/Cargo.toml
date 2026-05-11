@@ -1,0 +1,10 @@
+[package]
+name = "imbgbm-loss"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Asymmetric loss functions for imbgbm: BCE, Focal, PU, Asymmetric"
+
+[dependencies]
+
+[dev-dependencies]
