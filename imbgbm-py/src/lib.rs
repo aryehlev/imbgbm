@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 use std::sync::Arc;
 
+use imbgbm_calib::FoldStrategy;
 use imbgbm_core::Dataset;
 use imbgbm_infer::Model;
 use imbgbm_loss::{BCELoss, FocalLoss};
@@ -9,9 +10,8 @@ use imbgbm_sample::UniformSampler;
 use imbgbm_split::StandardSplitter;
 use imbgbm_train::{train, Config};
 
-// ── Python-visible model wrapper ─────────────────────────────────────────────
+// ── Python-visible model ──────────────────────────────────────────────────────
 
-/// imbgbm gradient boosted model for imbalanced binary classification.
 #[pyclass(name = "GradientBoostedTree")]
 struct PyModel {
     inner: Model,
@@ -19,15 +19,13 @@ struct PyModel {
 
 #[pymethods]
 impl PyModel {
-    /// Predict probabilities for a 2-D list of features (list-of-rows).
-    ///
-    /// Returns a list of f32 probabilities in [0, 1].
-    /// Uses OOF-calibrated probabilities when available, otherwise raw sigmoid.
     fn predict_proba(&self, x: Vec<Vec<f32>>) -> PyResult<Vec<f32>> {
+        let has_calib = self.inner.trees.iter().any(|t| {
+            t.leaf_probabilities.iter().any(|&p| p > 0.0)
+        });
         Ok(x.iter()
             .map(|row| {
-                if self.inner.trees.iter().any(|t| !t.leaf_probabilities.is_empty()
-                    && t.leaf_probabilities.iter().any(|&p| p > 0.0)) {
+                if has_calib {
                     self.inner.predict_proba_calibrated(row)
                 } else {
                     self.inner.predict_proba_raw(row)
@@ -36,38 +34,21 @@ impl PyModel {
             .collect())
     }
 
-    /// Predict raw log-odds scores (before sigmoid).
     fn predict_raw(&self, x: Vec<Vec<f32>>) -> PyResult<Vec<f32>> {
         Ok(x.iter().map(|row| self.inner.predict_raw(row)).collect())
     }
 
-    /// Serialize the model to a JSON string.
     fn to_json(&self) -> PyResult<String> {
         self.inner.to_json().map_err(|e| PyValueError::new_err(e.to_string()))
     }
 
-    /// Number of trees in the ensemble.
     fn n_trees(&self) -> usize {
         self.inner.trees.len()
     }
 }
 
-// ── Training entry point ─────────────────────────────────────────────────────
+// ── Training entry point ──────────────────────────────────────────────────────
 
-/// Train a gradient boosted tree model.
-///
-/// Args:
-///     x: list of rows, each row is a list of floats.
-///     y: list of binary labels (0.0 or 1.0).
-///     loss: "bce" or "focal".
-///     n_rounds: number of boosting rounds.
-///     learning_rate: step size.
-///     max_depth: maximum tree depth.
-///     subsample: row sub-sampling fraction.
-///     gamma: focal loss gamma parameter (ignored for bce).
-///     alpha: focal loss alpha parameter (ignored for bce).
-///     calibrate: enable OOF leaf calibration.
-///     seed: random seed.
 #[pyfunction]
 #[pyo3(signature = (
     x, y,
@@ -79,6 +60,7 @@ impl PyModel {
     gamma = 2.0,
     alpha = 0.25,
     calibrate = false,
+    fold_strategy = "random",
     seed = 42
 ))]
 fn fit(
@@ -92,6 +74,7 @@ fn fit(
     gamma: f32,
     alpha: f32,
     calibrate: bool,
+    fold_strategy: &str,
     seed: u64,
 ) -> PyResult<PyModel> {
     if x.is_empty() {
@@ -105,14 +88,18 @@ fn fit(
     let dataset = Dataset::from_rows(&rows, y);
 
     let objective: Arc<dyn imbgbm_loss::Objective> = match loss {
-        "bce" => Arc::new(BCELoss),
+        "bce"   => Arc::new(BCELoss),
         "focal" => Arc::new(FocalLoss::new(gamma, alpha)),
         other => {
             return Err(PyValueError::new_err(format!(
-                "unknown loss '{}': choose 'bce' or 'focal'",
-                other
+                "unknown loss '{other}': choose 'bce' or 'focal'"
             )))
         }
+    };
+
+    let fs = match fold_strategy {
+        "temporal" => FoldStrategy::Temporal,
+        _ => FoldStrategy::Random { seed },
     };
 
     let config = Config {
@@ -125,6 +112,8 @@ fn fit(
         n_bins: 255,
         k_folds: 5,
         calibrate,
+        fold_strategy: fs,
+        metadata: None,
         objective,
         sampler: Arc::new(UniformSampler::new(subsample, seed)),
         splitter: Arc::new(StandardSplitter),
@@ -132,19 +121,15 @@ fn fit(
         seed,
     };
 
-    let model = train(&dataset, &config);
-    Ok(PyModel { inner: model })
+    Ok(PyModel { inner: train(&dataset, &config) })
 }
 
-/// Load a model from a JSON string produced by `GradientBoostedTree.to_json()`.
 #[pyfunction]
 fn load_model(json: &str) -> PyResult<PyModel> {
     Model::from_json(json)
         .map(|m| PyModel { inner: m })
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
-
-// ── Module registration ───────────────────────────────────────────────────────
 
 #[pymodule]
 fn imbgbm(m: &Bound<'_, PyModule>) -> PyResult<()> {

@@ -1,23 +1,22 @@
-use imbgbm_calib::{assign_folds, calibrate_tree, FoldAssignment};
-use imbgbm_core::{BinnedDataset, BoostingState, Dataset};
+use imbgbm_calib::{assign_folds, calibrate_tree};
+use imbgbm_core::{BinnedDataset, BoostingState, Dataset, RowMetadata};
 use imbgbm_infer::{route_all, Model};
 
 use crate::{builder::grow_tree, config::Config};
 
 /// Train an imbgbm model.
-///
-/// Steps per round:
-///   1. Compute gradients/hessians from the current objective.
-///   2. Sample row indices (adaptive/GOSS/uniform).
-///   3. Grow a tree on the sampled subset.
-///   4. (Optional) OOF-calibrate leaf probabilities.
-///   5. Update cumulative predictions.
 pub fn train(dataset: &Dataset, config: &Config) -> Model {
-    // Bin the features once.
     let binned = BinnedDataset::from_dataset(dataset, config.n_bins);
     let n_rows = binned.n_rows;
 
-    // Compute init score: log(prior / (1-prior)) clipped.
+    // Resolve metadata: use the config-supplied one or an empty default.
+    let empty_meta = RowMetadata::empty();
+    let metadata: &RowMetadata = config
+        .metadata
+        .as_deref()
+        .unwrap_or(&empty_meta);
+
+    // Initial score: log-odds of the class prior.
     let prior = config
         .objective
         .class_prior()
@@ -29,16 +28,15 @@ pub fn train(dataset: &Dataset, config: &Config) -> Model {
     };
 
     let mut state = BoostingState::new(n_rows, init_score);
-    let folds: Option<FoldAssignment> = if config.calibrate {
-        Some(assign_folds(&binned.labels, config.k_folds, config.seed))
+
+    let folds = if config.calibrate {
+        Some(assign_folds(&binned.labels, metadata, config.k_folds, &config.fold_strategy))
     } else {
         None
     };
 
     let all_indices: Vec<u32> = (0..n_rows as u32).collect();
     let mut trees = Vec::with_capacity(config.n_rounds);
-
-    // Optional early stopping: track best loss on the training set.
     let mut best_loss = f32::INFINITY;
     let mut rounds_without_improvement = 0usize;
 
@@ -48,18 +46,20 @@ pub fn train(dataset: &Dataset, config: &Config) -> Model {
         state.gradients = g;
         state.hessians = h;
 
-        // ── 2. Sampling ─────────────────────────────────────────────────────
-        let sampled = config.sampler.sample_indices(
+        // ── 2. Sampling (returns indices + IPC weights) ──────────────────────
+        let sample = config.sampler.sample(
             &state.gradients,
             &state.hessians,
             &binned.labels,
+            metadata,
             round,
         );
 
-        // ── 3. Tree growing ──────────────────────────────────────────────────
+        // ── 3. Tree growing (uses IPC weights in histogram building) ─────────
         let mut tree = grow_tree(
             &binned,
-            &sampled,
+            &sample.indices,
+            &sample.ipc_weights,
             &state.gradients,
             &state.hessians,
             config.splitter.as_ref(),
@@ -72,14 +72,14 @@ pub fn train(dataset: &Dataset, config: &Config) -> Model {
 
         // ── 4. OOF calibration ───────────────────────────────────────────────
         if config.calibrate {
-            if let Some(ref folds) = folds {
+            if let Some(ref fold_assign) = folds {
                 calibrate_tree(
                     &mut tree,
                     &binned,
                     &all_indices,
                     &state.gradients,
                     &state.hessians,
-                    folds,
+                    fold_assign,
                     config.k_folds,
                     config.lambda,
                 );
@@ -95,7 +95,7 @@ pub fn train(dataset: &Dataset, config: &Config) -> Model {
 
         trees.push(tree);
 
-        // ── Early stopping (training loss, simple heuristic) ─────────────────
+        // ── Early stopping ────────────────────────────────────────────────────
         if let Some(patience) = config.early_stopping_rounds {
             let loss = mean_log_loss(&binned.labels, &state.predictions);
             if loss < best_loss - 1e-6 {
@@ -118,7 +118,7 @@ fn mean_log_loss(labels: &[f32], preds: &[f32]) -> f32 {
     let n = labels.len() as f32;
     labels
         .iter()
-        .zip(preds.iter())
+        .zip(preds)
         .map(|(&y, &x)| {
             let p = sigmoid(x).clamp(eps, 1.0 - eps);
             -(y * p.ln() + (1.0 - y) * (1.0 - p).ln())
@@ -129,10 +129,5 @@ fn mean_log_loss(labels: &[f32], preds: &[f32]) -> f32 {
 
 #[inline]
 fn sigmoid(x: f32) -> f32 {
-    if x >= 0.0 {
-        1.0 / (1.0 + (-x).exp())
-    } else {
-        let e = x.exp();
-        e / (1.0 + e)
-    }
+    if x >= 0.0 { 1.0 / (1.0 + (-x).exp()) } else { let e = x.exp(); e / (1.0 + e) }
 }

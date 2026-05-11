@@ -11,14 +11,16 @@ pub struct BinStats {
 }
 
 impl BinStats {
+    /// Accumulate one example.  `w` is the IPC weight (1/π_i); use 1.0 for
+    /// uniform/unweighted accumulation.
     #[inline]
-    pub fn add(&mut self, g: f32, h: f32, is_pos: bool) {
-        self.sum_g += g;
-        self.sum_h += h;
+    pub fn add(&mut self, g: f32, h: f32, w: f32, is_pos: bool) {
+        self.sum_g += g * w;
+        self.sum_h += h * w;
         self.count += 1;
         if is_pos {
-            self.sum_g_pos += g;
-            self.sum_h_pos += h;
+            self.sum_g_pos += g * w;
+            self.sum_h_pos += h * w;
             self.count_pos += 1;
         }
     }
@@ -51,10 +53,11 @@ impl Histogram {
         }
     }
 
-    /// Accumulate one example into this histogram.
+    /// Accumulate one example.  `w` is the IPC weight; use 1.0 if no
+    /// correction is needed.
     #[inline]
-    pub fn accumulate(&mut self, bin: u8, g: f32, h: f32, is_pos: bool) {
-        self.bins[bin as usize].add(g, h, is_pos);
+    pub fn accumulate(&mut self, bin: u8, g: f32, h: f32, w: f32, is_pos: bool) {
+        self.bins[bin as usize].add(g, h, w, is_pos);
     }
 
     /// Total stats across all bins (root node aggregate).
@@ -70,7 +73,7 @@ impl Histogram {
         })
     }
 
-    /// Compute the histogram for the complement (parent - this), used for histogram subtraction.
+    /// Compute the complement histogram (parent − self) for histogram subtraction.
     pub fn complement(&self, parent: &Histogram) -> Histogram {
         assert_eq!(self.bins.len(), parent.bins.len());
         let bins = self
@@ -83,7 +86,11 @@ impl Histogram {
     }
 }
 
-/// Build per-feature histograms for a set of row indices.
+/// Build per-feature histograms for the given row indices.
+///
+/// `ipc_weights[j]` is the inverse-probability correction weight for
+/// `indices[j]` (i.e. 1/π_{indices[j]}).  Pass a slice of all-ones (or an
+/// empty slice) to accumulate without correction.
 pub fn build_histograms(
     bins_col_major: &[Vec<u8>],
     n_bins_per_col: &[usize],
@@ -91,19 +98,23 @@ pub fn build_histograms(
     gradients: &[f32],
     hessians: &[f32],
     indices: &[u32],
+    ipc_weights: &[f32],
 ) -> Vec<Histogram> {
     let n_cols = bins_col_major.len();
+    let use_ipc = ipc_weights.len() == indices.len();
+
     let mut histograms: Vec<Histogram> = (0..n_cols)
         .map(|c| Histogram::new(c, n_bins_per_col[c]))
         .collect();
 
-    for &row in indices {
+    for (j, &row) in indices.iter().enumerate() {
         let r = row as usize;
         let g = gradients[r];
         let h = hessians[r];
+        let w = if use_ipc { ipc_weights[j] } else { 1.0 };
         let is_pos = labels[r] > 0.5;
         for (col, hist) in histograms.iter_mut().enumerate() {
-            hist.accumulate(bins_col_major[col][r], g, h, is_pos);
+            hist.accumulate(bins_col_major[col][r], g, h, w, is_pos);
         }
     }
 

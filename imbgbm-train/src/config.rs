@@ -1,4 +1,6 @@
 use std::sync::Arc;
+use imbgbm_calib::FoldStrategy;
+use imbgbm_core::RowMetadata;
 use imbgbm_loss::Objective;
 use imbgbm_sample::Sampler;
 use imbgbm_split::Splitter;
@@ -11,11 +13,8 @@ pub struct Config {
 
     // ── Tree topology ─────────────────────────────────────────────────────────
     pub max_depth: usize,
-    /// Minimum sum of hessians required in each leaf (like min_child_weight).
     pub min_child_weight: f32,
-    /// Minimum number of examples per leaf.
     pub min_samples_leaf: usize,
-    /// L2 regularisation for leaf values.
     pub lambda: f32,
 
     // ── Binning ───────────────────────────────────────────────────────────────
@@ -24,6 +23,14 @@ pub struct Config {
     // ── OOF calibration ───────────────────────────────────────────────────────
     pub k_folds: usize,
     pub calibrate: bool,
+    /// How to split examples into K folds.  Use `FoldStrategy::Temporal` when
+    /// `metadata.timestamps` is populated for RTB / time-sensitive settings.
+    pub fold_strategy: FoldStrategy,
+
+    // ── Per-row metadata (segments + timestamps) ──────────────────────────────
+    /// Optional contextual metadata used by the sampler and the calibrator.
+    /// Must have `n_rows` entries if provided; set to `None` to use defaults.
+    pub metadata: Option<Arc<RowMetadata>>,
 
     // ── Components ────────────────────────────────────────────────────────────
     pub objective: Arc<dyn Objective>,
@@ -31,14 +38,12 @@ pub struct Config {
     pub splitter: Arc<dyn Splitter>,
 
     // ── Early stopping ────────────────────────────────────────────────────────
-    /// Stop if validation metric does not improve for this many rounds.
     pub early_stopping_rounds: Option<usize>,
 
     pub seed: u64,
 }
 
 impl Config {
-    /// Construct a default BCE config with sensible hyperparameters.
     pub fn default_bce() -> Self {
         use imbgbm_loss::BCELoss;
         use imbgbm_sample::UniformSampler;
@@ -53,6 +58,8 @@ impl Config {
             n_bins: 255,
             k_folds: 5,
             calibrate: false,
+            fold_strategy: FoldStrategy::Random { seed: 42 },
+            metadata: None,
             objective: Arc::new(BCELoss),
             sampler: Arc::new(UniformSampler::new(0.8, 42)),
             splitter: Arc::new(StandardSplitter),
@@ -61,7 +68,6 @@ impl Config {
         }
     }
 
-    /// Construct a focal-loss config with OOF calibration enabled.
     pub fn focal_calibrated(gamma: f32, alpha: f32) -> Self {
         use imbgbm_loss::FocalLoss;
         use imbgbm_sample::AdaptiveSampler;
@@ -76,6 +82,8 @@ impl Config {
             n_bins: 255,
             k_folds: 5,
             calibrate: true,
+            fold_strategy: FoldStrategy::Random { seed: 42 },
+            metadata: None,
             objective: Arc::new(FocalLoss::new(gamma, alpha)),
             sampler: Arc::new(AdaptiveSampler::new(0.2, 0.1, Some(0.5), 0.0, 42)),
             splitter: Arc::new(VarianceAwareSplitter::new(0.1, 5)),

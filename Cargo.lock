@@ -204,6 +204,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "csv",
+ "imbgbm-calib",
  "imbgbm-core",
  "imbgbm-infer",
  "imbgbm-loss",
@@ -249,6 +250,7 @@ dependencies = [
 name = "imbgbm-sample"
 version = "0.1.0"
 dependencies = [
+ "imbgbm-core",
  "rand",
 ]
 
