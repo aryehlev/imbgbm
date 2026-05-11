@@ -1,2 +1,4 @@
 /target/
 catboost_info/
+__pycache__/
+*.pyc
