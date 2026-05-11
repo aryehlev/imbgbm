@@ -72,6 +72,8 @@ pub fn train(dataset: &Dataset, config: &Config) -> Model {
             config.min_samples_leaf,
             config.lambda,
             config.objective.class_prior(),
+            config.col_subsample,
+            config.seed.wrapping_add(round as u64 * 2654435761),
         );
 
         // ── 4. OOF calibration ───────────────────────────────────────────────

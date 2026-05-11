@@ -40,6 +40,12 @@ pub struct Config {
     // ── Early stopping ────────────────────────────────────────────────────────
     pub early_stopping_rounds: Option<usize>,
 
+    // ── Column subsampling (feature fraction per tree) ────────────────────────
+    /// Fraction of features sampled at random for each tree.  1.0 = all features.
+    /// Values in (0, 1) reduce variance and speed up training (like LightGBM's
+    /// `feature_fraction`).
+    pub col_subsample: f32,
+
     // ── Post-hoc Platt scaling on OOF boosted scores ──────────────────────────
     /// When true and `calibrate` is also true, fit Platt scaling `(a, b)` after
     /// training and store it on the model. Preserves additive boosting structure
@@ -70,6 +76,7 @@ impl Config {
             sampler: Arc::new(UniformSampler::new(0.8, 42)),
             splitter: Arc::new(StandardSplitter),
             early_stopping_rounds: Some(10),
+            col_subsample: 1.0,
             platt_scale: false,
             seed: 42,
         }
@@ -95,6 +102,7 @@ impl Config {
             sampler: Arc::new(AdaptiveSampler::new(0.2, 0.1, Some(0.5), 0.0, 42)),
             splitter: Arc::new(VarianceAwareSplitter::new(0.1, 5)),
             early_stopping_rounds: Some(20),
+            col_subsample: 1.0,
             platt_scale: true,
             seed: 42,
         }

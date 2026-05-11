@@ -100,23 +100,38 @@ pub fn build_histograms(
     indices: &[u32],
     ipc_weights: &[f32],
 ) -> Vec<Histogram> {
-    let n_cols = bins_col_major.len();
+    let all: Vec<usize> = (0..bins_col_major.len()).collect();
+    build_histograms_for_features(
+        bins_col_major, n_bins_per_col, labels,
+        gradients, hessians, indices, ipc_weights, &all,
+    )
+}
+
+/// Like `build_histograms` but only for the given feature indices (column subsampling).
+pub fn build_histograms_for_features(
+    bins_col_major: &[Vec<u8>],
+    n_bins_per_col: &[usize],
+    labels: &[f32],
+    gradients: &[f32],
+    hessians: &[f32],
+    indices: &[u32],
+    ipc_weights: &[f32],
+    feature_indices: &[usize],
+) -> Vec<Histogram> {
     let use_ipc = ipc_weights.len() == indices.len();
-
-    let mut histograms: Vec<Histogram> = (0..n_cols)
-        .map(|c| Histogram::new(c, n_bins_per_col[c]))
+    let mut histograms: Vec<Histogram> = feature_indices
+        .iter()
+        .map(|&c| Histogram::new(c, n_bins_per_col[c]))
         .collect();
-
     for (j, &row) in indices.iter().enumerate() {
         let r = row as usize;
         let g = gradients[r];
         let h = hessians[r];
         let w = if use_ipc { ipc_weights[j] } else { 1.0 };
         let is_pos = labels[r] > 0.5;
-        for (col, hist) in histograms.iter_mut().enumerate() {
+        for (&col, hist) in feature_indices.iter().zip(histograms.iter_mut()) {
             hist.accumulate(bins_col_major[col][r], g, h, w, is_pos);
         }
     }
-
     histograms
 }
