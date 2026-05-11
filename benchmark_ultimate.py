@@ -424,6 +424,14 @@ lr_cb = LogisticRegression(C=1e6, max_iter=1000)
 lr_cb.fit(_logit(l2_oof_rn_cb).reshape(-1, 1), y_train)
 super_probs_rn_cb_platt = lr_cb.predict_proba(_logit(super_probs_rn_cb).reshape(-1, 1))[:, 1].astype(np.float32)
 
+# Double calibration: Platt then isotonic on Platt-scaled OOF
+# Platt removes the global bias; isotonic fixes the small residual on a
+# near-zero starting ECE → much smaller distribution shift than pure isotonic
+l2_oof_rn_cb_platt_oof = lr_cb.predict_proba(_logit(l2_oof_rn_cb).reshape(-1, 1))[:, 1].astype(np.float32)
+iso_platt = IsotonicRegression(out_of_bounds="clip")
+iso_platt.fit(l2_oof_rn_cb_platt_oof, y_train)
+super_probs_rn_cb_platt_iso = iso_platt.predict(super_probs_rn_cb_platt).astype(np.float32)
+
 # Standard isotonic on raw L2 OOF (for reference)
 iso = IsotonicRegression(out_of_bounds="clip")
 iso.fit(l2_oof, y_train)
@@ -433,13 +441,48 @@ elapsed_super_iso = elapsed_super + (time.time() - t0_iso)
 print()
 print("=" * 72)
 print("SuperStack CB-RN + OOF-calibrated post-processing:")
-evaluate("SuperStack RN-CB+Iso ★★★★★", y_test, super_probs_rn_cb_iso, elapsed_super_iso)
-evaluate("SuperStack RN-CB+Platt ★★★★★", y_test, super_probs_rn_cb_platt, elapsed_super_iso)
+evaluate("SuperStack RN-CB+Iso", y_test, super_probs_rn_cb_iso, elapsed_super_iso)
+evaluate("SuperStack RN-CB+Platt", y_test, super_probs_rn_cb_platt, elapsed_super_iso)
+evaluate("SuperStack RN-CB+Platt+Iso ★★★★★★", y_test, super_probs_rn_cb_platt_iso, elapsed_super_iso)
 
 print()
 print("=" * 72)
 print("SuperStack raw-L2+Iso (for reference):")
 evaluate("SuperStack ★★★★", y_test, super_probs_cal, elapsed_super_iso)
+
+# ── [E] Level-3: imbgbm on [13 feat | CB-calibrated SuperStack score] ─────────
+# Hypothesis: the CB-RN+Platt score is a strong feature that gives imbgbm
+# CatBoost-level sharpness, while RankCal keeps ECE ≈ 0.0004.
+print()
+print("=" * 72)
+print("[E] Level-3: imbgbm Focal+Adapt on [13 feat | CB-calibrated L2 OOF] …")
+t0_l3 = time.time()
+
+# Build Level-3 train/test matrices (14 features)
+# Use the CB-RN+Platt OOF probabilities as the 14th feature for training
+# and the CB-RN+Platt test probabilities as the 14th feature for test
+l2_oof_rn_cb_platt_col = l2_oof_rn_cb_platt_oof.reshape(-1, 1)
+X_l3_tr = np.c_[X_tr_feat, l2_oof_rn_cb_platt_col]   # 14 features
+X_l3_te = np.c_[X_te_feat, super_probs_rn_cb_platt.reshape(-1, 1)]
+
+L3_TR = f"{BENCH_DIR}/l3_tr.csv"
+L3_TE = f"{BENCH_DIR}/l3_te.csv"
+np.savetxt(L3_TR, np.c_[X_l3_tr, y_train], delimiter=",", fmt="%.6f")
+np.savetxt(L3_TE, X_l3_te,                  delimiter=",", fmt="%.6f")
+
+run_cli(["train","--input",L3_TR,"--output",f"{BENCH_DIR}/m_l3.json",
+         "--loss","focal","--n-rounds","1000","--learning-rate","0.02",
+         "--max-depth","7","--gamma","2.0","--alpha","0.25",
+         "--calibrate","--sampler","adaptive","--subsample","0.5",
+         "--col-subsample","0.8","--early-stopping-rounds","0"])
+r_l3 = run_cli(["predict","--input",L3_TE,"--model",f"{BENCH_DIR}/m_l3.json","--calibrated"])
+super_probs_l3 = read_probs(r_l3.stdout)
+elapsed_l3 = elapsed_super_iso + (time.time() - t0_l3)
+
+print()
+print("=" * 72)
+print("Level-3 imbgbm result:")
+evaluate("SuperStack L3-imbgbm ★★★★★★", y_test, super_probs_l3, elapsed_l3)
 
 # ── Summary ────────────────────────────────────────────────────────────────────
 print()
