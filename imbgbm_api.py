@@ -36,6 +36,7 @@ class ImbGBM:
         learning_rate: float = 0.05,
         max_depth: int  = 7,
         subsample: float = 0.8,
+        col_subsample: float = 1.0,  # feature fraction per tree (1.0 = all)
         seed: int       = 42,
         early_stopping_rounds: int = 0,
         # ── Loss ──────────────────────────────────────────────────────────
@@ -71,6 +72,7 @@ class ImbGBM:
         self.learning_rate        = learning_rate
         self.max_depth            = max_depth
         self.subsample            = subsample
+        self.col_subsample        = col_subsample
         self.seed                 = seed
         self.early_stopping_rounds = early_stopping_rounds
         self.loss                 = loss
@@ -307,6 +309,7 @@ class ImbGBM:
             "--learning-rate", str(self.learning_rate),
             "--max-depth",     str(self.max_depth),
             "--subsample",     str(self.subsample),
+            "--col-subsample", str(self.col_subsample),
             "--sampler",       self.sampler,
             "--splitter",      self.splitter,
             "--gamma",         str(self.gamma),

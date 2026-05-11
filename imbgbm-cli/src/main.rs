@@ -78,6 +78,10 @@ enum Commands {
         /// `predict --pu` to apply the correction.
         #[arg(long)]
         estimate_pu_rate: bool,
+        /// Fraction of features sampled per tree (column subsampling).
+        /// 1.0 = all features; 0.8 is a good starting point.
+        #[arg(long, default_value_t = 1.0)]
+        col_subsample: f32,
     },
     /// Predict probabilities for a feature CSV (no label column, no header).
     Predict {
@@ -119,7 +123,7 @@ fn main() {
         Commands::Train {
             input, output, loss, pu_prior, splitter, n_rounds, learning_rate, max_depth,
             subsample, sampler, gamma, alpha, calibrate, platt, fold_strategy, seed,
-            early_stopping_rounds, seed_expansion, estimate_pu_rate,
+            early_stopping_rounds, seed_expansion, estimate_pu_rate, col_subsample,
         } => {
             let (features, labels) = load_csv_with_label(&input);
             let rows: Vec<&[f32]> = features.iter().map(|r| r.as_slice()).collect();
@@ -159,6 +163,7 @@ fn main() {
                 sampler: build_sampler(&sampler, subsample, seed),
                 splitter: split_impl,
                 early_stopping_rounds: if early_stopping_rounds == 0 { None } else { Some(early_stopping_rounds) },
+                col_subsample: col_subsample.clamp(0.01, 1.0),
                 platt_scale: platt,
                 seed,
             };

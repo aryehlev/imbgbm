@@ -1,8 +1,10 @@
 use imbgbm_core::{
-    histogram::{build_histograms, Histogram},
+    build_histograms_for_features,
     BinnedDataset, CalibratedTree, InternalNode, Node, NodeKind, TreeStructure,
 };
 use imbgbm_split::Splitter;
+use rand::{Rng, SeedableRng};
+use rand::rngs::SmallRng;
 
 /// Grow a single regression tree on the given `indices` subset.
 ///
@@ -20,6 +22,8 @@ pub fn grow_tree(
     min_samples_leaf: usize,
     lambda: f32,
     prior: Option<f32>,
+    col_subsample: f32,
+    rng_seed: u64,
 ) -> CalibratedTree {
     let mut nodes: Vec<Node> = Vec::new();
     let mut leaf_values: Vec<f32> = Vec::new();
@@ -31,6 +35,20 @@ pub fn grow_tree(
     let (root_g, root_h) = weighted_sum(indices, ipc_weights, gradients, hessians);
 
     let n_bins_per_col: Vec<usize> = (0..data.n_cols).map(|c| data.n_bins_for_col(c)).collect();
+
+    // Column subsampling: pick a random feature subset once per tree.
+    let feature_indices: Vec<usize> = if col_subsample >= 1.0 || data.n_cols == 0 {
+        (0..data.n_cols).collect()
+    } else {
+        let k = ((data.n_cols as f32 * col_subsample).ceil() as usize).max(1).min(data.n_cols);
+        let mut rng = SmallRng::seed_from_u64(rng_seed);
+        let mut all: Vec<usize> = (0..data.n_cols).collect();
+        for i in 0..k {
+            let j = i + rng.gen_range(0..(data.n_cols - i));
+            all.swap(i, j);
+        }
+        all[..k].to_vec()
+    };
 
     // Allocate root node slot.
     nodes.push(Node { kind: NodeKind::Leaf { leaf_idx: 0 } });
@@ -64,7 +82,7 @@ pub fn grow_tree(
             continue;
         }
 
-        let histograms = build_histograms(
+        let histograms = build_histograms_for_features(
             &data.bins,
             &n_bins_per_col,
             &data.labels,
@@ -72,6 +90,7 @@ pub fn grow_tree(
             hessians,
             &idx,
             &weights,
+            &feature_indices,
         );
 
         match splitter.find_best_split(&histograms, prior, lambda, min_child_weight) {

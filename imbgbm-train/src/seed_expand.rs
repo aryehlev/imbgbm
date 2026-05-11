@@ -194,6 +194,7 @@ fn clone_config_with_metadata(c: &Config, md: Option<Arc<RowMetadata>>) -> Confi
         sampler: c.sampler.clone(),
         splitter: c.splitter.clone(),
         early_stopping_rounds: c.early_stopping_rounds,
+        col_subsample: c.col_subsample,
         platt_scale: c.platt_scale,
         seed: c.seed,
     }
