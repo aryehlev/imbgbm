@@ -239,9 +239,12 @@ version = "0.1.0"
 name = "imbgbm-py"
 version = "0.1.0"
 dependencies = [
+ "imbgbm-calib",
  "imbgbm-core",
  "imbgbm-infer",
  "imbgbm-loss",
+ "imbgbm-sample",
+ "imbgbm-split",
  "imbgbm-train",
  "pyo3",
 ]

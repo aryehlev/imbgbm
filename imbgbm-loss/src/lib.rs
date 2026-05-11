@@ -222,6 +222,73 @@ impl Objective for PULoss {
     }
 }
 
+// ── Density-ratio loss ──────────────────────────────────────────────────────
+
+/// Logistic-loss density-ratio objective (Kanamori et al. 2010, Menon & Ong 2016).
+///
+/// Trains the tree to output `r(x) = log p(x | positives) / p(x | unlabeled)`,
+/// the log-density-ratio of positives over the unlabeled population. This is
+/// exactly the lookalike quantity: "how overrepresented is this user pattern
+/// among the seeds?" — without forcing a classification framing on top of
+/// unreliable negatives.
+///
+/// Per-example loss:
+///   y=1 (positive): L+ = softplus(-x) · (1 - π)
+///   y=0 (unlabeled): L- = softplus(+x) · π
+///
+/// The π reweighting (P/U mass-balancing) is required so the Bayes-optimal
+/// minimiser is the log-density-ratio rather than the log-posterior. We use
+/// `π = mass_ratio = E[w_P] / (E[w_P] + E[w_U])`, defaulting to 0.5.
+///
+/// Equivalent to: train BCE on (positives ∪ unlabeled), but with positives
+/// re-weighted by (1 - π)/π and unlabeled by 1.
+pub struct DensityRatioLoss {
+    /// Mass-balance parameter in (0, 1). 0.5 = symmetric P/U treatment.
+    pub pi: f32,
+}
+
+impl DensityRatioLoss {
+    pub fn new(pi: f32) -> Self {
+        assert!(pi > 0.0 && pi < 1.0, "pi must be in (0, 1)");
+        DensityRatioLoss { pi }
+    }
+}
+
+impl Objective for DensityRatioLoss {
+    fn grad_hess(&self, y_true: &[f32], y_pred: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        let n = y_true.len();
+        let mut gv = Vec::with_capacity(n);
+        let mut hv = Vec::with_capacity(n);
+        let w_pos = 1.0 - self.pi;
+        let w_unl = self.pi;
+        for (&y, &x) in y_true.iter().zip(y_pred) {
+            let p = sigmoid(x);
+            let (g, h) = if y > 0.5 {
+                // d/dx softplus(-x) = -sigmoid(-x) = p - 1
+                (w_pos * (p - 1.0), w_pos * p * (1.0 - p))
+            } else {
+                // d/dx softplus(x) = sigmoid(x) = p
+                (w_unl * p, w_unl * p * (1.0 - p))
+            };
+            gv.push(g);
+            hv.push(h.max(EPS));
+        }
+        (gv, hv)
+    }
+
+    fn predict_proba(&self, raw: f32) -> f32 {
+        // Output is a log-density-ratio, not a probability. We expose
+        // sigmoid(raw) as a monotone transform that produces values in [0, 1]
+        // suitable for ranking; calibration must be applied separately for
+        // a probabilistic interpretation.
+        sigmoid(raw)
+    }
+
+    fn class_prior(&self) -> Option<f32> {
+        Some(self.pi)
+    }
+}
+
 // ── Asymmetric loss ─────────────────────────────────────────────────────────
 
 /// Asymmetric loss (Ridnik et al. 2021): different focusing for
@@ -383,6 +450,7 @@ mod tests {
             Box::new(FocalLoss::new(2.0, 0.25)),
             Box::new(FocalLoss::new(5.0, 0.5)),
             Box::new(PULoss::new(0.1)),
+            Box::new(DensityRatioLoss::new(0.5)),
         ];
         for loss in &losses {
             for &x in &[-4.0_f32, -1.0, 0.0, 1.0, 4.0] {

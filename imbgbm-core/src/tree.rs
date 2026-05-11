@@ -83,6 +83,15 @@ pub struct CalibratedTree {
     pub leaf_probabilities: Vec<f32>,
     /// Per-leaf example count from the training pass.
     pub leaf_counts: Vec<u32>,
+    /// Sum of IPC-corrected hessians in each leaf (an effective sample size
+    /// that accounts for sampling bias and gradient mass). Used for
+    /// uncertainty-aware leaf shrinkage at inference time.
+    #[serde(default)]
+    pub leaf_effective_n: Vec<f32>,
+    /// Per-leaf positive count, used for confidence-interval estimation in
+    /// PU/imbalanced settings.
+    #[serde(default)]
+    pub leaf_positive_counts: Vec<u32>,
 }
 
 impl CalibratedTree {
@@ -93,6 +102,8 @@ impl CalibratedTree {
             leaf_values: vec![0.0; n],
             leaf_probabilities: vec![0.0; n],
             leaf_counts: vec![0; n],
+            leaf_effective_n: vec![0.0; n],
+            leaf_positive_counts: vec![0; n],
         }
     }
 
@@ -106,5 +117,22 @@ impl CalibratedTree {
     #[inline]
     pub fn predict_prob(&self, features: &[f32]) -> f32 {
         self.leaf_probabilities[self.structure.route(features)]
+    }
+
+    /// Predict the leaf value shrunk toward zero by an inverse-effective-size
+    /// factor. Used by `Model::predict_proba_shrunk` to avoid trusting tiny
+    /// leaves that look perfectly separated by chance.
+    ///
+    /// `shrunk = raw * eff_n / (eff_n + alpha)`
+    ///
+    /// Reduces to the raw value as `eff_n → ∞` and to zero as `eff_n → 0`.
+    /// `alpha` is the shrinkage strength (10–50 is typical).
+    #[inline]
+    pub fn predict_shrunk(&self, features: &[f32], alpha: f32) -> f32 {
+        let leaf = self.structure.route(features);
+        let raw = self.leaf_values[leaf];
+        if self.leaf_effective_n.is_empty() { return raw; }
+        let n_eff = self.leaf_effective_n[leaf];
+        raw * (n_eff / (n_eff + alpha))
     }
 }

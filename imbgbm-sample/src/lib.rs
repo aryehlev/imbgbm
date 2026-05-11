@@ -3,6 +3,8 @@ use rand::{Rng, SeedableRng};
 use rand::rngs::SmallRng;
 use std::collections::HashMap;
 
+pub mod modes;
+
 // ── SampleSet ────────────────────────────────────────────────────────────────
 
 /// The output of a single sampling step: which rows to use and their IPC weights.
@@ -339,6 +341,9 @@ impl Sampler for AdaptiveSampler {
             }
 
             for (seg_val, pool) in &by_segment {
+                // Segments with the NO_CLUSTER sentinel (e.g. unlabeled rows in
+                // a positive-mode segment) are not enforced — only real modes.
+                if *seg_val == crate::modes::NO_CLUSTER { continue; }
                 let current = *seg_counts.get(seg_val).unwrap_or(&0);
                 let needed = quota.min_per_segment.saturating_sub(current);
                 if needed == 0 {
@@ -376,6 +381,187 @@ impl Sampler for AdaptiveSampler {
             }
             indices = new_indices;
             weights = new_weights;
+        }
+
+        SampleSet { indices, ipc_weights: weights }
+    }
+}
+
+// ── PU-GOSS sampler ──────────────────────────────────────────────────────────
+
+/// Positive-Unlabeled Gradient-Based One-Side Sampling.
+///
+/// A PU-specialised refinement of LightGBM's GOSS. GOSS keeps the
+/// largest-|gradient| examples and subsamples the rest. PU-GOSS recognises that
+/// in a PU setup the unlabeled pool contains hidden positives, and that the
+/// most informative training rows are not just high-gradient: they are also
+/// (a) suspiciously-high-scoring unlabeled (likely hidden positives), and
+/// (b) unlabeled close to the decision boundary (likely lookalikes).
+///
+/// ## Strata (each tree's sample is the union of)
+///   1. **All labeled positives** (no subsampling — they are precious).
+///   2. **High-|gradient| unlabeled** ("hard" — currently mis-fit).
+///   3. **High-score unlabeled** ("suspicious" — likely hidden positives).
+///   4. **High-uncertainty unlabeled** (large hessian, |grad| near zero —
+///      boundary lookalikes; relevant for hard-negative mining).
+///   5. **Reliable-negative unlabeled** (very low score, low gradient) —
+///      subsampled at `reliable_neg_rate` to anchor the negative class.
+///
+/// Score for unlabeled examples is recovered from `|gradient|`, which equals
+/// `p` for BCE/focal/PU losses when `y = 0`.
+///
+/// ## IPC weights
+/// Strata 2–5 each carry `1 / sampling_probability` so the histogram remains an
+/// unbiased estimator of the full-data gradient. Labeled positives have weight
+/// 1 since they are always included.
+pub struct PuGossSampler {
+    pub top_grad_rate: f32,
+    pub top_score_rate: f32,
+    pub uncertainty_rate: f32,
+    pub reliable_neg_rate: f32,
+    /// Hard-negative mining boost: oversample stratum 4 by this factor
+    /// (IPC adjusted accordingly so it stays unbiased).
+    pub hard_neg_boost: f32,
+    pub seed: u64,
+}
+
+impl PuGossSampler {
+    pub fn new(
+        top_grad_rate: f32,
+        top_score_rate: f32,
+        uncertainty_rate: f32,
+        reliable_neg_rate: f32,
+        seed: u64,
+    ) -> Self {
+        for &r in &[top_grad_rate, top_score_rate, uncertainty_rate, reliable_neg_rate] {
+            assert!((0.0..=1.0).contains(&r), "PU-GOSS rates must lie in [0, 1]");
+        }
+        PuGossSampler {
+            top_grad_rate,
+            top_score_rate,
+            uncertainty_rate,
+            reliable_neg_rate,
+            hard_neg_boost: 1.0,
+            seed,
+        }
+    }
+
+    pub fn with_hard_neg_boost(mut self, boost: f32) -> Self {
+        assert!(boost >= 1.0, "boost must be >= 1.0");
+        self.hard_neg_boost = boost;
+        self
+    }
+}
+
+impl Sampler for PuGossSampler {
+    fn sample(
+        &self,
+        gradients: &[f32],
+        hessians: &[f32],
+        labels: &[f32],
+        _metadata: &RowMetadata,
+        round: usize,
+    ) -> SampleSet {
+        let n = gradients.len();
+        let mut rng = SmallRng::seed_from_u64(self.seed ^ (round as u64 * 0xa511_7f8b));
+
+        // Partition rows by label.
+        let mut pos: Vec<u32> = Vec::new();
+        let mut unl: Vec<u32> = Vec::with_capacity(n);
+        for i in 0..n {
+            if labels[i] > 0.5 { pos.push(i as u32) } else { unl.push(i as u32) };
+        }
+
+        let abs_grads: Vec<f32> = gradients.iter().map(|g| g.abs()).collect();
+        // "Boundary uncertainty" = hessian (high for p≈0.5, low for p≈0 or 1).
+        // We rank unlabeled by hessian * (1 - 2*|grad|/(|grad|+EPS)) — i.e.
+        // high hessian + low |grad|. Equivalent to ranking by p*(1-p) when
+        // (1 - 2|y - p|) is large.
+        let uncertainty: Vec<f32> = (0..n)
+            .map(|i| hessians[i] * (1.0 - abs_grads[i]).max(0.0))
+            .collect();
+
+        // Build sorted unlabeled index pools by each criterion (descending).
+        let mut by_grad: Vec<u32> = unl.clone();
+        by_grad.sort_unstable_by(|&a, &b| {
+            abs_grads[b as usize].partial_cmp(&abs_grads[a as usize]).unwrap()
+        });
+        let mut by_score: Vec<u32> = unl.clone();
+        // For unlabeled (y=0), |gradient| = p (BCE/focal). For other losses,
+        // |gradient| is still monotone in the score, so this remains a valid
+        // ranking.
+        by_score.sort_unstable_by(|&a, &b| {
+            abs_grads[b as usize].partial_cmp(&abs_grads[a as usize]).unwrap()
+        });
+        let mut by_unc: Vec<u32> = unl.clone();
+        by_unc.sort_unstable_by(|&a, &b| {
+            uncertainty[b as usize].partial_cmp(&uncertainty[a as usize]).unwrap()
+        });
+        // Reliable negatives: lowest score AND low |grad|.
+        let mut by_reliable: Vec<u32> = unl.clone();
+        by_reliable.sort_unstable_by(|&a, &b| {
+            abs_grads[a as usize].partial_cmp(&abs_grads[b as usize]).unwrap()
+        });
+
+        let nu = unl.len() as f32;
+        let take = |frac: f32| -> usize {
+            ((nu * frac).ceil() as usize).min(unl.len())
+        };
+        let k_grad   = take(self.top_grad_rate);
+        let k_score  = take(self.top_score_rate);
+        // Hard-negative mining: take more uncertainty examples but mark the
+        // sampling probability so the IPC correction stays honest.
+        let k_unc    = take((self.uncertainty_rate * self.hard_neg_boost).min(1.0));
+        let k_rel    = take(self.reliable_neg_rate);
+
+        let mut taken = std::collections::HashSet::new();
+        let mut indices: Vec<u32> = Vec::with_capacity(pos.len() + k_grad + k_score + k_unc + k_rel);
+        let mut weights: Vec<f32> = Vec::with_capacity(indices.capacity());
+
+        // Stratum 1: all positives (no subsampling).
+        for &p in &pos {
+            indices.push(p);
+            weights.push(1.0);
+            taken.insert(p);
+        }
+
+        let push_stratum =
+            |pool: &[u32], k: usize, stratum_size: usize, taken: &mut std::collections::HashSet<u32>,
+             indices: &mut Vec<u32>, weights: &mut Vec<f32>| {
+                if k == 0 || stratum_size == 0 { return; }
+                let pi = (k as f32 / stratum_size as f32).clamp(f32::EPSILON, 1.0);
+                let w = 1.0 / pi;
+                let mut added = 0usize;
+                for &row in pool {
+                    if added >= k { break; }
+                    if taken.insert(row) {
+                        indices.push(row);
+                        weights.push(w);
+                        added += 1;
+                    }
+                }
+            };
+
+        // Stratum 2: top |gradient|.
+        push_stratum(&by_grad, k_grad, unl.len(), &mut taken, &mut indices, &mut weights);
+        // Stratum 3: top score (suspicious unlabeled).
+        push_stratum(&by_score, k_score, unl.len(), &mut taken, &mut indices, &mut weights);
+        // Stratum 4: high uncertainty / hard-negative lookalikes.
+        push_stratum(&by_unc, k_unc, unl.len(), &mut taken, &mut indices, &mut weights);
+        // Stratum 5: reliable negatives — sample uniformly from the bottom
+        // half by |gradient| so we do not always pick the same anchors.
+        let bottom_half_end = (unl.len() / 2).max(k_rel);
+        let bottom_pool: Vec<u32> = by_reliable.iter().take(bottom_half_end).copied().collect();
+        if !bottom_pool.is_empty() && k_rel > 0 {
+            let drawn = sample_without_replacement(&bottom_pool, k_rel, &mut rng);
+            let pi = (k_rel as f32 / unl.len() as f32).clamp(f32::EPSILON, 1.0);
+            let w = 1.0 / pi;
+            for row in drawn {
+                if taken.insert(row) {
+                    indices.push(row);
+                    weights.push(w);
+                }
+            }
         }
 
         SampleSet { indices, ipc_weights: weights }

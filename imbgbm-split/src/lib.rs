@@ -130,6 +130,135 @@ impl Splitter for VarianceAwareSplitter {
     }
 }
 
+// ── PU-aware splitter ────────────────────────────────────────────────────────
+
+/// PU-aware split criterion (Bekker & Davis 2018 style).
+///
+/// Standard Newton gain rewards any split that separates labels along the
+/// gradient. In a PU setup this is misleading: a "great" split can be the
+/// result of a few hidden positives lurking in the unlabeled side, which the
+/// tree then memorises. PU-aware gain decomposes the standard gain into
+/// trustable / suspicious parts:
+///
+///   `score = newton_gain                              (raw signal)
+///          × credibility(n_labeled_pos, total_count)  (we have enough seeds?)
+///          × leaf_shrinkage(min(n_left, n_right))     (tiny leaves penalised)
+///          + purity_lambda · |p_left - p_right|       (mass separation bonus)`
+///
+/// All three multipliers lie in `[0, 1]` so the resulting gain is bounded by
+/// the standard Newton gain. The factors switch on / off via:
+///   `credibility = n_lp / (n_lp + alpha_credibility)`  — Jeffreys-like prior
+///                                                       on labeled-positive count
+///   `shrinkage   = n / (n + alpha_shrinkage)`           — small-leaf prior
+///
+/// `alpha_*` are pseudo-count strengths (10–50 typical). With both alphas at 0
+/// this recovers the variance-aware splitter.
+pub struct PuAwareSplitter {
+    pub purity_lambda: f32,
+    pub alpha_credibility: f32,
+    pub alpha_shrinkage: f32,
+    /// Minimum labeled positives required in each child.  Mirrors
+    /// VarianceAwareSplitter::min_positives_per_leaf but applies to the labeled
+    /// positive count, not the predicted positive count.
+    pub min_labeled_pos_per_leaf: u32,
+}
+
+impl PuAwareSplitter {
+    pub fn new(
+        purity_lambda: f32,
+        alpha_credibility: f32,
+        alpha_shrinkage: f32,
+        min_labeled_pos_per_leaf: u32,
+    ) -> Self {
+        PuAwareSplitter {
+            purity_lambda,
+            alpha_credibility,
+            alpha_shrinkage,
+            min_labeled_pos_per_leaf,
+        }
+    }
+}
+
+impl Splitter for PuAwareSplitter {
+    fn find_best_split(
+        &self,
+        histograms: &[Histogram],
+        _prior: Option<f32>,
+        lambda: f32,
+        min_child_weight: f32,
+    ) -> Option<SplitInfo> {
+        let mut best: Option<SplitInfo> = None;
+
+        for hist in histograms {
+            let n_bins = hist.bins.len();
+            if n_bins < 2 { continue; }
+
+            let total = hist.total();
+            let (tot_g, tot_h) = (total.sum_g, total.sum_h);
+
+            let mut left_g = 0.0_f32; let mut left_h = 0.0_f32;
+            let mut left_count = 0u32; let mut left_pos = 0u32;
+
+            for b in 0..n_bins - 1 {
+                let bin = &hist.bins[b];
+                left_g += bin.sum_g; left_h += bin.sum_h;
+                left_count += bin.count; left_pos += bin.count_pos;
+
+                let right_g = tot_g - left_g; let right_h = tot_h - left_h;
+                let right_count = total.count - left_count;
+                let right_pos = total.count_pos - left_pos;
+
+                if left_h < min_child_weight || right_h < min_child_weight { continue; }
+                if left_count == 0 || right_count == 0 { continue; }
+                if left_pos < self.min_labeled_pos_per_leaf
+                   || right_pos < self.min_labeled_pos_per_leaf
+                {
+                    continue;
+                }
+
+                let raw_gain = newton_gain(tot_g, tot_h, left_g, left_h, right_g, right_h, lambda);
+
+                // Credibility: each child must have enough labeled positives
+                // for its apparent gain to be trusted.
+                let cred = |n_lp: u32| {
+                    let n = n_lp as f32;
+                    n / (n + self.alpha_credibility.max(0.0))
+                };
+                let credibility = cred(left_pos).min(cred(right_pos));
+
+                // Shrinkage: tiny leaves get pulled toward zero gain.
+                let shr = |n: u32| {
+                    let n = n as f32;
+                    n / (n + self.alpha_shrinkage.max(0.0))
+                };
+                let shrinkage = shr(left_count).min(shr(right_count));
+
+                let purity_delta = {
+                    let frac = |n_p: u32, n: u32| {
+                        if n == 0 { 0.0 } else { n_p as f32 / n as f32 }
+                    };
+                    (frac(left_pos, left_count) - frac(right_pos, right_count)).abs()
+                };
+
+                let score = raw_gain * credibility * shrinkage
+                          + self.purity_lambda * purity_delta;
+
+                if best.as_ref().map_or(true, |best_s| score > best_s.gain) {
+                    best = Some(SplitInfo {
+                        feature: hist.feature,
+                        split_bin: b as u8,
+                        gain: score,
+                        class_purity_delta: purity_delta,
+                        left_sum_g: left_g, left_sum_h: left_h, left_count,
+                        right_sum_g: right_g, right_sum_h: right_h, right_count,
+                    });
+                }
+            }
+        }
+        best.filter(|s| s.gain > 0.0)
+    }
+}
+
 // ── Shared scan ──────────────────────────────────────────────────────────────
 
 fn best_split_over_features(

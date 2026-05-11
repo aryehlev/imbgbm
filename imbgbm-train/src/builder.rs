@@ -24,6 +24,8 @@ pub fn grow_tree(
     let mut nodes: Vec<Node> = Vec::new();
     let mut leaf_values: Vec<f32> = Vec::new();
     let mut leaf_counts: Vec<u32> = Vec::new();
+    let mut leaf_effective_n: Vec<f32> = Vec::new();
+    let mut leaf_positive_counts: Vec<u32> = Vec::new();
 
     // Root gradient/hessian sums (IPC-weighted).
     let (root_g, root_h) = weighted_sum(indices, ipc_weights, gradients, hessians);
@@ -43,6 +45,10 @@ pub fn grow_tree(
         root_h,
     )];
 
+    let count_positives = |idx: &[u32]| -> u32 {
+        idx.iter().filter(|&&r| data.labels[r as usize] > 0.5).count() as u32
+    };
+
     while let Some((slot, idx, weights, depth, sum_g, sum_h)) = stack.pop() {
         let make_leaf = depth >= max_depth
             || idx.len() < min_samples_leaf.max(2)
@@ -52,6 +58,8 @@ pub fn grow_tree(
             let leaf_idx = leaf_values.len() as u32;
             leaf_values.push(-sum_g / (sum_h + lambda));
             leaf_counts.push(idx.len() as u32);
+            leaf_effective_n.push(sum_h);
+            leaf_positive_counts.push(count_positives(&idx));
             nodes[slot] = Node { kind: NodeKind::Leaf { leaf_idx } };
             continue;
         }
@@ -71,6 +79,8 @@ pub fn grow_tree(
                 let leaf_idx = leaf_values.len() as u32;
                 leaf_values.push(-sum_g / (sum_h + lambda));
                 leaf_counts.push(idx.len() as u32);
+                leaf_effective_n.push(sum_h);
+                leaf_positive_counts.push(count_positives(&idx));
                 nodes[slot] = Node { kind: NodeKind::Leaf { leaf_idx } };
             }
             Some(split) => {
@@ -85,6 +95,8 @@ pub fn grow_tree(
                     let leaf_idx = leaf_values.len() as u32;
                     leaf_values.push(-sum_g / (sum_h + lambda));
                     leaf_counts.push(idx.len() as u32);
+                    leaf_effective_n.push(sum_h);
+                    leaf_positive_counts.push(count_positives(&idx));
                     nodes[slot] = Node { kind: NodeKind::Leaf { leaf_idx } };
                     continue;
                 }
@@ -129,7 +141,14 @@ pub fn grow_tree(
     let structure = TreeStructure { nodes, n_leaves };
     let leaf_probabilities = vec![0.0f32; n_leaves];
 
-    CalibratedTree { structure, leaf_values, leaf_probabilities, leaf_counts }
+    CalibratedTree {
+        structure,
+        leaf_values,
+        leaf_probabilities,
+        leaf_counts,
+        leaf_effective_n,
+        leaf_positive_counts,
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
