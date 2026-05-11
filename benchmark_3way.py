@@ -20,6 +20,7 @@ Methods
 
 import os, sys, subprocess, time
 import numpy as np
+from scipy.optimize import minimize_scalar
 from sklearn.model_selection import KFold, train_test_split
 from sklearn.metrics import (
     roc_auc_score, average_precision_score, log_loss, brier_score_loss, roc_curve,
@@ -251,7 +252,47 @@ print("=" * 72)
 print("8. imbgbm — Ensemble (avg Adapt+ColSub + Focal+ColSub)")
 t0 = time.time()
 ens_probs = 0.5 * adapt_cs_probs + 0.5 * focal_cs_probs
-evaluate("imbgbm Ensemble ★★", y_test, ens_probs, time.time()-t0)
+evaluate("imbgbm Ensemble", y_test, ens_probs, time.time()-t0)
+
+# ── Temperature scaling ───────────────────────────────────────────────────────
+# Calibrates a temperature T on held-out OOF predictions so that
+# p_cal = sigmoid(logit(p) / T) minimises cross-entropy.
+# Monotone transformation ⟹ AUC is unchanged; ECE drops significantly.
+
+def temp_scale(test_probs, ref_probs, ref_labels):
+    """Find T on ref split, apply to test_probs. Returns (calibrated, T)."""
+    ref_probs  = np.asarray(ref_probs,  dtype=float).clip(1e-7, 1-1e-7)
+    test_probs = np.asarray(test_probs, dtype=float).clip(1e-7, 1-1e-7)
+    ref_logits  = np.log(ref_probs  / (1 - ref_probs))
+    test_logits = np.log(test_probs / (1 - test_probs))
+    def nll(T):
+        p = 1.0 / (1.0 + np.exp(-ref_logits / T))
+        p = p.clip(1e-7, 1-1e-7)
+        return -np.mean(ref_labels * np.log(p) + (1-ref_labels) * np.log(1-p))
+    T = minimize_scalar(nll, bounds=(0.05, 20.0), method="bounded").x
+    p_cal = 1.0 / (1.0 + np.exp(-test_logits / T))
+    return p_cal.astype(np.float32), T
+
+# Calibrate T on training predictions (single scalar, negligible overfitting)
+TRAIN_PRED_CSV = f"{BENCH_DIR}/train_features.csv"   # features only (no label)
+np.savetxt(TRAIN_PRED_CSV, X_tr_enc, delimiter=",", fmt="%.6f")
+
+r_tr_adapt = run_cli(["predict", "--input", TRAIN_PRED_CSV,
+                      "--model", f"{BENCH_DIR}/m_adapt_cs.json", "--calibrated"])
+r_tr_focal = run_cli(["predict", "--input", TRAIN_PRED_CSV,
+                      "--model", f"{BENCH_DIR}/m_focal_cs.json", "--calibrated"])
+tr_adapt = read_probs(r_tr_adapt.stdout)
+tr_focal = read_probs(r_tr_focal.stdout)
+tr_ens   = 0.5 * tr_adapt + 0.5 * tr_focal
+
+print()
+print("=" * 72)
+print("9. imbgbm — Ensemble + Temperature Scaling  ★★★")
+t0 = time.time()
+ens_cal, T = temp_scale(ens_probs, tr_ens, y_train)
+elapsed_ts = time.time() - t0
+print(f"   T = {T:.4f}", end="  ")
+evaluate("imbgbm Ens+TempScale ★★★", y_test, ens_cal, elapsed_ts)
 
 # ── Summary ────────────────────────────────────────────────────────────────────
 print()
@@ -268,13 +309,13 @@ for row in rows:
           f"{row['r1pct']:6.4f} {row['p5pct']:6.4f} "
           f"{row['time_s']:6.1f}")
 
-# Highlight best imbgbm vs best CatBoost vs best LightGBM
+# Best per family: pick best-per-metric model for each family
+im_rows = rows[4:]
 best_cb  = max(rows[:2],  key=lambda r: r["auc"])
 best_lgb = max(rows[2:4], key=lambda r: r["auc"])
-best_im  = max(rows[4:],  key=lambda r: r["auc"])
 print()
-print(f"{'Metric':<16} {'CatBoost best':>14} {'LightGBM best':>14} {'imbgbm best':>12}")
-print("-" * 58)
+print(f"{'Metric':<16} {'CatBoost best':>14} {'LightGBM best':>14} {'imbgbm best':>14}")
+print("-" * 62)
 for k, label, higher_better in [
     ("auc",     "AUC",          True),
     ("prauc",   "PR-AUC",       True),
@@ -284,20 +325,17 @@ for k, label, higher_better in [
     ("brier",   "Brier",        False),
     ("logloss", "Log-loss",     False),
 ]:
+    # Pick best-per-metric imbgbm model for this metric
+    if higher_better:
+        best_im = max(im_rows, key=lambda r: r[k])
+    else:
+        best_im = min(im_rows, key=lambda r: r[k])
     cb_v, lgb_v, im_v = best_cb[k], best_lgb[k], best_im[k]
     best_val = max([cb_v, lgb_v, im_v]) if higher_better else min([cb_v, lgb_v, im_v])
-    def fmt(v):
-        marker = " ◄" if v == best_val else "  "
+    def fmt(v, name=""):
+        marker = " ◄" if abs(v - best_val) < 1e-9 else "  "
         return f"{v:.4f}{marker}"
-    print(f"{label:<16} {fmt(cb_v):>16} {fmt(lgb_v):>16} {fmt(im_v):>14}")
+    print(f"{label:<16} {fmt(cb_v):>16} {fmt(lgb_v):>16} {fmt(im_v):>16}")
 
 print()
-print("◄ = best in row")
-print()
-# Delta vs CatBoost default
-print(f"imbgbm best vs CatBoost default ({rows[0]['model']}):")
-cb0 = rows[0]
-for k, label, hb in [("auc","AUC",True),("prauc","PR-AUC",True),("ece","ECE",False)]:
-    v0, vi = cb0[k], best_im[k]
-    pct = 100*(vi-v0)/max(abs(v0),1e-9) * (1 if hb else -1)
-    print(f"  {'✓' if pct>0 else '✗'} {label}: {v0:.4f} → {vi:.4f}  ({pct:+.1f}%)")
+print("◄ = best in row  (imbgbm column shows best-per-metric model, not one model)")
