@@ -73,6 +73,8 @@ pub fn train(dataset: &Dataset, config: &Config) -> Model {
             config.min_samples_leaf,
             config.lambda,
             config.objective.class_prior(),
+            config.col_subsample,
+            config.seed.wrapping_add(round as u64 * 2654435761),
         );
 
         // ── 4. OOF calibration ───────────────────────────────────────────────
@@ -196,6 +198,7 @@ fn collect_kfold_raw_oof_scores(dataset: &Dataset, config: &Config) -> Vec<f32> 
             sampler:                config.sampler.clone(),
             splitter:               config.splitter.clone(),
             early_stopping_rounds:  config.early_stopping_rounds,
+            col_subsample:          config.col_subsample,
             platt_scale:            false,
             raw_isotonic:           false,
             seed:                   config.seed.wrapping_add(fold as u64 * 0x9e3779b9u64),

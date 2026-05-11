@@ -59,6 +59,10 @@ enum Commands {
         /// Early-stopping patience in rounds (0 = disabled)
         #[arg(long, default_value_t = 20)]
         early_stopping_rounds: usize,
+        /// Fraction of features randomly selected per tree (column subsampling).
+        /// 0.8 adds diversity across trees; 1.0 uses all features.
+        #[arg(long, default_value_t = 0.8)]
+        col_subsample: f32,
         /// L2 regularisation strength for leaf values. Lower = more aggressive splits.
         #[arg(long, default_value_t = 1.0)]
         lambda: f32,
@@ -118,7 +122,7 @@ fn main() {
         Commands::Train {
             input, output, loss, n_rounds, learning_rate, max_depth,
             subsample, sampler, gamma, alpha, calibrate, platt, fold_strategy, seed,
-            early_stopping_rounds, lambda, min_samples_leaf, min_child_weight, raw_isotonic,
+            early_stopping_rounds, col_subsample, lambda, min_samples_leaf, min_child_weight, raw_isotonic,
         } => {
             let (features, labels) = load_csv_with_label(&input);
             let rows: Vec<&[f32]> = features.iter().map(|r| r.as_slice()).collect();
@@ -142,6 +146,7 @@ fn main() {
                 min_samples_leaf,
                 lambda,
                 n_bins: 255,
+                col_subsample,
                 k_folds: 5,
                 calibrate,
                 fold_strategy: fs,
