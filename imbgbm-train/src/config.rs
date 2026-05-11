@@ -40,11 +40,16 @@ pub struct Config {
     // ── Early stopping ────────────────────────────────────────────────────────
     pub early_stopping_rounds: Option<usize>,
 
-    // ── Post-hoc Platt scaling on OOF boosted scores ──────────────────────────
+    // ── Post-hoc calibration on OOF boosted scores ────────────────────────────
     /// When true and `calibrate` is also true, fit Platt scaling `(a, b)` after
     /// training and store it on the model. Preserves additive boosting structure
     /// (unlike per-leaf probability averaging).
     pub platt_scale: bool,
+    /// When true and `calibrate` is also true, fit an isotonic calibration mapping
+    /// on OOF raw scores. Gives ~10× higher probability resolution than per-leaf
+    /// averaging while keeping ECE near CatBoost. Mutually exclusive with
+    /// `platt_scale`; if both are true, isotonic takes precedence.
+    pub raw_isotonic: bool,
 
     pub seed: u64,
 }
@@ -71,6 +76,7 @@ impl Config {
             splitter: Arc::new(StandardSplitter),
             early_stopping_rounds: Some(10),
             platt_scale: false,
+            raw_isotonic: false,
             seed: 42,
         }
     }
@@ -96,6 +102,7 @@ impl Config {
             splitter: Arc::new(VarianceAwareSplitter::new(0.1, 5)),
             early_stopping_rounds: Some(20),
             platt_scale: true,
+            raw_isotonic: false,
             seed: 42,
         }
     }

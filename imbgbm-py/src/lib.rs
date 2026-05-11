@@ -119,6 +119,7 @@ fn fit(
         splitter: Arc::new(StandardSplitter),
         early_stopping_rounds: None,
         platt_scale: false,
+        raw_isotonic: false,
         seed,
     };
 

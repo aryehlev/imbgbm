@@ -10,8 +10,11 @@ name = "imbgbm"
 crate-type = ["cdylib"]
 
 [dependencies]
-imbgbm-train.workspace = true
-imbgbm-infer.workspace = true
-imbgbm-core.workspace  = true
-imbgbm-loss.workspace  = true
+imbgbm-train.workspace  = true
+imbgbm-infer.workspace  = true
+imbgbm-core.workspace   = true
+imbgbm-loss.workspace   = true
+imbgbm-calib.workspace  = true
+imbgbm-sample.workspace = true
+imbgbm-split.workspace  = true
 pyo3.workspace = true

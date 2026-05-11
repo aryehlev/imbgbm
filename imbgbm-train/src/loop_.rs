@@ -1,6 +1,6 @@
-use imbgbm_calib::{assign_folds, calibrate_tree, calibrate_tree_with_oof, fit_platt};
+use imbgbm_calib::{assign_folds, calibrate_tree, calibrate_tree_with_oof, fit_platt, fit_raw_isotonic};
 use imbgbm_core::{BinnedDataset, BoostingState, Dataset, RowMetadata};
-use imbgbm_infer::{route_all, Model};
+use imbgbm_infer::{route_all, Model, RawIsoCal};
 
 use crate::{builder::grow_tree, config::Config};
 
@@ -40,9 +40,10 @@ pub fn train(dataset: &Dataset, config: &Config) -> Model {
     let mut best_loss = f32::INFINITY;
     let mut rounds_without_improvement = 0usize;
 
-    // Per-row OOF boosted score (used to fit Platt scaling without leakage).
+    // Per-row OOF boosted score (used to fit Platt or isotonic calibration).
     let mut oof_predictions: Vec<f32> = vec![init_score; n_rows];
-    let want_platt = config.calibrate && config.platt_scale;
+    let want_platt    = config.calibrate && config.platt_scale && !config.raw_isotonic;
+    let want_raw_iso  = config.calibrate && config.raw_isotonic;
 
     for round in 0..config.n_rounds {
         // ── 1. Gradients ────────────────────────────────────────────────────
@@ -78,6 +79,7 @@ pub fn train(dataset: &Dataset, config: &Config) -> Model {
         if config.calibrate {
             if let Some(ref fold_assign) = folds {
                 if want_platt {
+                    // Platt scaling needs per-row OOF accumulated scores.
                     let per_row_oof = calibrate_tree_with_oof(
                         &mut tree,
                         &binned,
@@ -92,6 +94,8 @@ pub fn train(dataset: &Dataset, config: &Config) -> Model {
                         oof_predictions[row] += config.learning_rate * per_row_oof[row];
                     }
                 } else {
+                    // Per-leaf OOF positive-rate calibration (also used as
+                    // fallback when raw_isotonic is on and caller uses calibrated mode).
                     calibrate_tree(
                         &mut tree,
                         &binned,
@@ -137,7 +141,77 @@ pub fn train(dataset: &Dataset, config: &Config) -> Model {
         let (a, b) = fit_platt(&oof_predictions, &binned.labels);
         model = model.with_platt(a, b);
     }
+
+    // Fit isotonic calibration by training K held-out fold models and collecting
+    // their predictions on the rows they never saw.  These are genuine
+    // out-of-sample scores with the same distribution as full-model test scores,
+    // so no scale/offset correction is needed at inference.
+    if want_raw_iso {
+        let true_oof = collect_kfold_raw_oof_scores(dataset, config);
+        let (scores, probs) = fit_raw_isotonic(&true_oof, &binned.labels);
+        model.raw_iso_cal = RawIsoCal { scores, probs, scale: 1.0, offset: 0.0 };
+    }
+
     model
+}
+
+/// Train K fold models on K-1 folds each; return per-row raw scores on the
+/// held-out fold.  These are genuine out-of-sample predictions whose score
+/// distribution matches the full-model test distribution, so they can feed
+/// isotonic calibration without any scale/offset correction.
+fn collect_kfold_raw_oof_scores(dataset: &Dataset, config: &Config) -> Vec<f32> {
+    let n = dataset.n_rows;
+    let binned_tmp = BinnedDataset::from_dataset(dataset, config.n_bins);
+    let empty_meta = RowMetadata::empty();
+    let metadata = config.metadata.as_deref().unwrap_or(&empty_meta);
+    let fold_assign = assign_folds(
+        &binned_tmp.labels, metadata, config.k_folds, &config.fold_strategy,
+    );
+
+    let mut oof_scores = vec![0.0f32; n];
+
+    for fold in 0..config.k_folds {
+        // Build fold training/validation splits.
+        let train_indices: Vec<u32> = (0..n as u32)
+            .filter(|&i| fold_assign[i as usize] != fold).collect();
+        let val_rows: Vec<usize> = (0..n)
+            .filter(|&i| fold_assign[i] == fold).collect();
+
+        let fold_dataset = dataset.subset(&train_indices);
+
+        // Fold model config: same hyper-params, no calibration, no isotonic.
+        let fold_config = Config {
+            n_rounds:               config.n_rounds,
+            learning_rate:          config.learning_rate,
+            max_depth:              config.max_depth,
+            min_child_weight:       config.min_child_weight,
+            min_samples_leaf:       config.min_samples_leaf,
+            lambda:                 config.lambda,
+            n_bins:                 config.n_bins,
+            k_folds:                config.k_folds,
+            calibrate:              false,
+            fold_strategy:          config.fold_strategy.clone(),
+            metadata:               None,
+            objective:              config.objective.clone(),
+            sampler:                config.sampler.clone(),
+            splitter:               config.splitter.clone(),
+            early_stopping_rounds:  config.early_stopping_rounds,
+            platt_scale:            false,
+            raw_isotonic:           false,
+            seed:                   config.seed.wrapping_add(fold as u64 * 0x9e3779b9u64),
+        };
+
+        let fold_model = train(&fold_dataset, &fold_config);
+
+        // Score held-out rows using the fold model.
+        // Dataset is column-major; assemble each row on the fly.
+        for &i in &val_rows {
+            let row: Vec<f32> = dataset.features.iter().map(|col| col[i]).collect();
+            oof_scores[i] = fold_model.predict_raw(&row);
+        }
+    }
+
+    oof_scores
 }
 
 fn mean_log_loss(labels: &[f32], preds: &[f32]) -> f32 {

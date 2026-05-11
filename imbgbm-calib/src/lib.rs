@@ -303,6 +303,126 @@ fn calibrate_tree_inner(
     }
 }
 
+// ── OOF raw-score isotonic calibration ───────────────────────────────────────
+
+/// Fit an isotonic calibration mapping from OOF raw boosted scores to probabilities.
+///
+/// Sorts `(score, label)` pairs, runs Pool-Adjacent-Violators isotonic regression,
+/// then compresses the step function by storing one breakpoint per block.
+///
+/// Returns `(sorted_scores, calibrated_probs)` for storage in the model.  At
+/// inference, linear interpolation between breakpoints gives smooth predictions.
+pub fn fit_raw_isotonic(oof_scores: &[f32], labels: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    assert_eq!(oof_scores.len(), labels.len());
+    if oof_scores.is_empty() {
+        return (vec![], vec![]);
+    }
+
+    // Sort by score ascending.
+    let mut order: Vec<usize> = (0..oof_scores.len()).collect();
+    order.sort_by(|&a, &b| oof_scores[a].partial_cmp(&oof_scores[b]).unwrap_or(std::cmp::Ordering::Equal));
+
+    let pairs: Vec<(f32, f32, f32)> = order.iter()
+        .map(|&i| (oof_scores[i], labels[i], 1.0_f32))
+        .collect();
+
+    let calibrated = isotonic_regression(&pairs);
+
+    // Compress: for each block of identical prob values, store the score
+    // at the block midpoint so linear interpolation tracks block boundaries.
+    let sorted_scores: Vec<f32> = pairs.iter().map(|(s, _, _)| *s).collect();
+    let mut out_scores = Vec::new();
+    let mut out_probs  = Vec::new();
+
+    let mut i = 0;
+    while i < calibrated.len() {
+        let p = calibrated[i];
+        let mut j = i;
+        while j < calibrated.len() && (calibrated[j] - p).abs() < 1e-9 {
+            j += 1;
+        }
+        // Store score at start, middle, and end of block to give the interpolation
+        // well-defined behaviour at block boundaries.
+        out_scores.push(sorted_scores[i]);
+        out_probs.push(p);
+        if j - 1 > i {
+            let mid = (i + j - 1) / 2;
+            out_scores.push(sorted_scores[mid]);
+            out_probs.push(p);
+            out_scores.push(sorted_scores[j - 1]);
+            out_probs.push(p);
+        }
+        i = j;
+    }
+
+    (out_scores, out_probs)
+}
+
+// ── PU label-frequency estimation (Elkan & Noto 2008) ────────────────────────
+
+/// Estimator type for the PU labeling rate `c = P(s=1 | y=1)`.
+#[derive(Clone, Copy, Debug)]
+pub enum PuPriorEstimator {
+    /// e1: mean predicted P(s=1|x) over held-out labeled positives. Most stable.
+    MeanOverPositives,
+    /// e2: 1 over the maximum predicted P(s=1|x) — sensitive to outliers.
+    MaxOverPositives,
+    /// e3: median predicted P(s=1|x) over labeled positives. Robust alternative.
+    MedianOverPositives,
+}
+
+/// Estimate the PU labeling rate `c = P(s=1 | y=1)` from out-of-fold predictions.
+///
+/// Inputs:
+///   `oof_scores` – out-of-fold P(s=1|x) for every training row.
+///   `labels`      – the observed labels (1 = labeled positive, 0 = unlabeled).
+///   `estimator`   – which of Elkan & Noto's three estimators to use.
+///
+/// Returns `c ∈ (0, 1]`. Under SCAR (selected completely at random), the true
+/// positive probability is `P(y=1|x) = P(s=1|x) / c`. Lower `c` → larger
+/// upward correction at inference.
+pub fn estimate_pu_label_rate(
+    oof_scores: &[f32],
+    labels: &[f32],
+    estimator: PuPriorEstimator,
+) -> f32 {
+    assert_eq!(oof_scores.len(), labels.len());
+    let pos_scores: Vec<f32> = oof_scores
+        .iter()
+        .zip(labels)
+        .filter(|(_, &y)| y > 0.5)
+        .map(|(&s, _)| s)
+        .collect();
+    if pos_scores.is_empty() {
+        return 1.0;
+    }
+    let c = match estimator {
+        PuPriorEstimator::MeanOverPositives => {
+            pos_scores.iter().sum::<f32>() / pos_scores.len() as f32
+        }
+        PuPriorEstimator::MaxOverPositives => {
+            pos_scores.iter().copied().fold(0.0f32, f32::max)
+        }
+        PuPriorEstimator::MedianOverPositives => {
+            let mut s = pos_scores.clone();
+            s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            s[s.len() / 2]
+        }
+    };
+    c.clamp(1e-3, 1.0)
+}
+
+/// Apply the Elkan-Noto class-prior correction to a predicted probability.
+///
+/// `P(y=1|x) = clip(P(s=1|x) / c, 0, 1)`
+///
+/// In practice the linear rescaling can push values above 1 in the tail —
+/// callers should `clamp(0, 1)` after applying.
+#[inline]
+pub fn pu_correct_probability(p_s_given_x: f32, c: f32) -> f32 {
+    (p_s_given_x / c.max(1e-3)).clamp(0.0, 1.0)
+}
+
 // ── Platt scaling on OOF boosted scores ──────────────────────────────────────
 
 /// Fit Platt scaling `(a, b)` minimising binary log-loss of

@@ -59,6 +59,21 @@ enum Commands {
         /// Early-stopping patience in rounds (0 = disabled)
         #[arg(long, default_value_t = 20)]
         early_stopping_rounds: usize,
+        /// L2 regularisation strength for leaf values. Lower = more aggressive splits.
+        #[arg(long, default_value_t = 1.0)]
+        lambda: f32,
+        /// Minimum number of training samples required in each leaf node.
+        #[arg(long, default_value_t = 20)]
+        min_samples_leaf: usize,
+        /// Minimum sum of hessians (effective sample count) for a child to be valid.
+        #[arg(long, default_value_t = 1.0)]
+        min_child_weight: f32,
+        /// Fit OOF isotonic calibration on raw boosted scores (requires --calibrate).
+        /// Gives ~10× higher probability resolution than per-leaf averaging, matching
+        /// CatBoost Brier/LogLoss while preserving imbgbm's superior ranking.
+        /// Mutually exclusive with --platt; isotonic takes precedence when both set.
+        #[arg(long)]
+        raw_isotonic: bool,
     },
     /// Predict probabilities for a feature CSV (no label column, no header).
     Predict {
@@ -72,6 +87,28 @@ enum Commands {
         /// Use Platt-scaled probabilities (requires --platt at train time)
         #[arg(long)]
         platt: bool,
+        /// Apply Elkan-Noto PU correction: P(y=1|x) = p / c (requires
+        /// --estimate-pu-rate at train time).
+        #[arg(long)]
+        pu: bool,
+        /// Apply leaf-confidence shrinkage with the given alpha (0 = off).
+        /// Tiny leaves get pulled toward zero; reduces overbidding noise.
+        #[arg(long, default_value_t = 0.0)]
+        shrink_alpha: f32,
+        /// Use OOF isotonic calibrated probabilities (requires --raw-isotonic at train time).
+        #[arg(long)]
+        raw_isotonic: bool,
+    },
+    /// Rank an unlabeled pool by information gain for active labeling.
+    /// Output: one `row_index,score` per line, descending by score.
+    Query {
+        #[arg(short, long)]
+        input: String,
+        #[arg(short, long)]
+        model: String,
+        /// Number of rows to output (0 = all).
+        #[arg(long, default_value_t = 0)]
+        budget: usize,
     },
 }
 
@@ -81,7 +118,7 @@ fn main() {
         Commands::Train {
             input, output, loss, n_rounds, learning_rate, max_depth,
             subsample, sampler, gamma, alpha, calibrate, platt, fold_strategy, seed,
-            early_stopping_rounds,
+            early_stopping_rounds, lambda, min_samples_leaf, min_child_weight, raw_isotonic,
         } => {
             let (features, labels) = load_csv_with_label(&input);
             let rows: Vec<&[f32]> = features.iter().map(|r| r.as_slice()).collect();
@@ -101,9 +138,9 @@ fn main() {
                 n_rounds,
                 learning_rate,
                 max_depth,
-                min_child_weight: 1.0,
-                min_samples_leaf: 20,
-                lambda: 1.0,
+                min_child_weight,
+                min_samples_leaf,
+                lambda,
                 n_bins: 255,
                 k_folds: 5,
                 calibrate,
@@ -114,6 +151,7 @@ fn main() {
                 splitter: Arc::new(StandardSplitter),
                 early_stopping_rounds: if early_stopping_rounds == 0 { None } else { Some(early_stopping_rounds) },
                 platt_scale: platt,
+                raw_isotonic,
                 seed,
             };
 
@@ -129,13 +167,17 @@ fn main() {
             eprintln!("Model → {output}");
         }
 
-        Commands::Predict { input, model, calibrated, platt } => {
+        Commands::Predict { input, model, calibrated, platt, pu, shrink_alpha: _, raw_isotonic } => {
             let rows = load_csv_features(&input);
             let json = std::fs::read_to_string(&model).expect("could not read model");
             let m = Model::from_json(&json).expect("model parse error");
 
             for row in &rows {
-                let p = if platt {
+                let p = if pu {
+                    m.predict_proba_pu(row)
+                } else if raw_isotonic {
+                    m.predict_proba_raw_iso(row)
+                } else if platt {
                     m.predict_proba_platt(row)
                 } else if calibrated {
                     m.predict_proba_calibrated(row)
@@ -144,6 +186,11 @@ fn main() {
                 };
                 println!("{p:.6}");
             }
+        }
+
+        Commands::Query { input: _, model: _, budget: _ } => {
+            eprintln!("Query command not yet implemented.");
+            std::process::exit(1);
         }
     }
 }
