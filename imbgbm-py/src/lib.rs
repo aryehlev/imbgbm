@@ -118,6 +118,7 @@ fn fit(
         sampler: Arc::new(UniformSampler::new(subsample, seed)),
         splitter: Arc::new(StandardSplitter),
         early_stopping_rounds: None,
+        platt_scale: false,
         seed,
     };
 

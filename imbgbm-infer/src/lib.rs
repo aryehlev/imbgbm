@@ -15,11 +15,21 @@ pub struct Model {
     pub trees: Vec<CalibratedTree>,
     pub learning_rate: f32,
     pub init_score: f32,
+    /// Optional Platt scaling parameters `(a, b)` fit on OOF boosted scores.
+    /// When set, `predict_proba_platt(x) = sigmoid(a * raw_score + b)`.
+    /// Preserves the additive boosting structure (unlike per-leaf averaging).
+    #[serde(default)]
+    pub platt: Option<(f32, f32)>,
 }
 
 impl Model {
     pub fn new(trees: Vec<CalibratedTree>, learning_rate: f32, init_score: f32) -> Self {
-        Model { trees, learning_rate, init_score }
+        Model { trees, learning_rate, init_score, platt: None }
+    }
+
+    pub fn with_platt(mut self, a: f32, b: f32) -> Self {
+        self.platt = Some((a, b));
+        self
     }
 
     /// Predict the raw log-odds sum for a single example.
@@ -47,6 +57,15 @@ impl Model {
         }
         let sum: f32 = self.trees.iter().map(|t| t.predict_prob(features)).sum();
         sum / self.trees.len() as f32
+    }
+
+    /// Predict probability through the Platt-scaled boosted score.
+    /// Falls back to `predict_proba_raw` if Platt parameters are not present.
+    pub fn predict_proba_platt(&self, features: &[f32]) -> f32 {
+        match self.platt {
+            Some((a, b)) => sigmoid(a * self.predict_raw(features) + b),
+            None => self.predict_proba_raw(features),
+        }
     }
 
     /// Batch predict (raw mode) for a matrix stored row-major.

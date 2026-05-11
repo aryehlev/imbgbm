@@ -5,7 +5,7 @@ use imbgbm_calib::FoldStrategy;
 use imbgbm_core::Dataset;
 use imbgbm_infer::Model;
 use imbgbm_loss::{BCELoss, FocalLoss};
-use imbgbm_sample::UniformSampler;
+use imbgbm_sample::{AdaptiveSampler, GossSampler, Sampler, UniformSampler};
 use imbgbm_split::StandardSplitter;
 use imbgbm_train::{train, Config};
 
@@ -35,6 +35,9 @@ enum Commands {
         max_depth: usize,
         #[arg(long, default_value_t = 0.8)]
         subsample: f32,
+        /// Sampler: uniform | goss | adaptive
+        #[arg(long, default_value = "uniform")]
+        sampler: String,
         #[arg(long, default_value_t = 2.0)]
         gamma: f32,
         #[arg(long, default_value_t = 0.25)]
@@ -42,6 +45,11 @@ enum Commands {
         /// Enable OOF leaf calibration
         #[arg(long)]
         calibrate: bool,
+        /// Fit Platt scaling on OOF boosted scores (requires --calibrate).
+        /// Preserves additive boosting structure; superior to per-leaf averaging
+        /// for fixing focal-loss miscalibration.
+        #[arg(long)]
+        platt: bool,
         /// Fold strategy for OOF calibration: random | temporal
         /// (temporal requires a timestamp column before the label)
         #[arg(long, default_value = "random")]
@@ -58,9 +66,12 @@ enum Commands {
         input: String,
         #[arg(short, long)]
         model: String,
-        /// Use OOF-calibrated probabilities (requires --calibrate at train time)
+        /// Use OOF-leaf-calibrated probabilities (requires --calibrate at train time)
         #[arg(long)]
         calibrated: bool,
+        /// Use Platt-scaled probabilities (requires --platt at train time)
+        #[arg(long)]
+        platt: bool,
     },
 }
 
@@ -69,7 +80,7 @@ fn main() {
     match cli.command {
         Commands::Train {
             input, output, loss, n_rounds, learning_rate, max_depth,
-            subsample, gamma, alpha, calibrate, fold_strategy, seed,
+            subsample, sampler, gamma, alpha, calibrate, platt, fold_strategy, seed,
             early_stopping_rounds,
         } => {
             let (features, labels) = load_csv_with_label(&input);
@@ -99,9 +110,10 @@ fn main() {
                 fold_strategy: fs,
                 metadata: None,
                 objective,
-                sampler: Arc::new(UniformSampler::new(subsample, seed)),
+                sampler: build_sampler(&sampler, subsample, seed),
                 splitter: Arc::new(StandardSplitter),
                 early_stopping_rounds: if early_stopping_rounds == 0 { None } else { Some(early_stopping_rounds) },
+                platt_scale: platt,
                 seed,
             };
 
@@ -117,13 +129,15 @@ fn main() {
             eprintln!("Model → {output}");
         }
 
-        Commands::Predict { input, model, calibrated } => {
+        Commands::Predict { input, model, calibrated, platt } => {
             let rows = load_csv_features(&input);
             let json = std::fs::read_to_string(&model).expect("could not read model");
             let m = Model::from_json(&json).expect("model parse error");
 
             for row in &rows {
-                let p = if calibrated {
+                let p = if platt {
+                    m.predict_proba_platt(row)
+                } else if calibrated {
                     m.predict_proba_calibrated(row)
                 } else {
                     m.predict_proba_raw(row)
@@ -131,6 +145,20 @@ fn main() {
                 println!("{p:.6}");
             }
         }
+    }
+}
+
+fn build_sampler(name: &str, subsample: f32, seed: u64) -> Arc<dyn Sampler> {
+    match name {
+        "goss"     => Arc::new(GossSampler::new(0.2, subsample.max(0.1), seed)),
+        "adaptive" => Arc::new(AdaptiveSampler::new(
+            0.2,                      // keep top-20% by |gradient|
+            subsample.max(0.1),       // sample tail at given rate
+            Some(0.5),                // re-balance toward 50/50 classes
+            0.1,                      // light uncertainty boost
+            seed,
+        )),
+        _ => Arc::new(UniformSampler::new(subsample, seed)),
     }
 }
 

@@ -153,6 +153,26 @@ pub fn assign_folds_temporal(timestamps: &[i64], k_folds: usize) -> FoldAssignme
 /// Final `leaf_probabilities[l]` = isotonic-calibrated P(y=1 | route→leaf l),
 ///                                  derived from the K (leaf_value, pos_rate)
 ///                                  pairs via Pool-Adjacent-Violators regression.
+/// Calibrate a tree's leaf values via K-fold OOF statistics and **also** return
+/// the per-row OOF leaf value (i.e. the leaf value computed from the K-1 folds
+/// that did not include that row). Summing the OOF leaf value across all trees
+/// gives an honest OOF boosted score, suitable for fitting post-hoc Platt
+/// scaling without label leakage.
+pub fn calibrate_tree_with_oof(
+    tree: &mut CalibratedTree,
+    data: &BinnedDataset,
+    indices: &[u32],
+    gradients: &[f32],
+    hessians: &[f32],
+    folds: &FoldAssignment,
+    k_folds: usize,
+    lambda: f32,
+) -> Vec<f32> {
+    let oof = calibrate_tree_inner(tree, data, indices, gradients, hessians,
+                                    folds, k_folds, lambda, true);
+    oof.expect("returned OOF leaf values requested")
+}
+
 pub fn calibrate_tree(
     tree: &mut CalibratedTree,
     data: &BinnedDataset,
@@ -163,6 +183,21 @@ pub fn calibrate_tree(
     k_folds: usize,
     lambda: f32,
 ) {
+    let _ = calibrate_tree_inner(tree, data, indices, gradients, hessians,
+                                  folds, k_folds, lambda, false);
+}
+
+fn calibrate_tree_inner(
+    tree: &mut CalibratedTree,
+    data: &BinnedDataset,
+    indices: &[u32],
+    gradients: &[f32],
+    hessians: &[f32],
+    folds: &FoldAssignment,
+    k_folds: usize,
+    lambda: f32,
+    return_oof: bool,
+) -> Option<Vec<f32>> {
     let n_leaves = tree.structure.n_leaves;
 
     // Global positive rate — used as a Bayesian prior to prevent per-leaf
@@ -198,6 +233,9 @@ pub fn calibrate_tree(
         }
     }
 
+    // Per-(fold, leaf) OOF leaf value, used when returning per-row OOF scores.
+    let mut fold_leaf_val = vec![vec![0.0f32; n_leaves]; k_folds];
+
     // Aggregate per-leaf.
     for l in 0..n_leaves {
         let mut oof_pairs: Vec<(f32, f32, f32)> = Vec::new(); // (leaf_value, pos_rate, weight)
@@ -205,6 +243,7 @@ pub fn calibrate_tree(
         for k in 0..k_folds {
             if fold_sum_h[k][l] > 0.0 && fold_total[k][l] > 0 {
                 let val = -fold_sum_g[k][l] / (fold_sum_h[k][l] + lambda);
+                fold_leaf_val[k][l] = val;
                 // Beta-prior smoothing: prevents collapse to 0 when the OOF
                 // fold has few positives (common with 5% imbalance + K=5 folds).
                 let count_pos   = fold_pos[k][l] as f32;
@@ -242,6 +281,79 @@ pub fn calibrate_tree(
 
         tree.leaf_probabilities[l] = best_prob;
     }
+
+    if return_oof {
+        // For each row, look up its (fold, leaf) and emit the OOF leaf value.
+        let n = data.labels.len();
+        let mut per_row = vec![0.0f32; n];
+        for row in 0..n {
+            let leaf = route_to_leaf(tree, data, row);
+            let k    = folds[row];
+            // If the (fold, leaf) slot was empty (row's leaf was unseen OOF),
+            // fall back to the in-sample leaf value.
+            per_row[row] = if fold_total[k][leaf] > 0 {
+                fold_leaf_val[k][leaf]
+            } else {
+                tree.leaf_values[leaf]
+            };
+        }
+        Some(per_row)
+    } else {
+        None
+    }
+}
+
+// ── Platt scaling on OOF boosted scores ──────────────────────────────────────
+
+/// Fit Platt scaling `(a, b)` minimising binary log-loss of
+/// `sigmoid(a * score + b)` against `labels`.
+///
+/// Uses Newton-Raphson with full Hessian. Converges in ~5–10 iterations.
+pub fn fit_platt(scores: &[f32], labels: &[f32]) -> (f32, f32) {
+    assert_eq!(scores.len(), labels.len(), "scores/labels length mismatch");
+    let n = scores.len() as f32;
+    if n == 0.0 { return (1.0, 0.0); }
+
+    // Smoothed targets (Platt 1999 §5) — prevents log(0) for perfect splits.
+    let n_pos: f32 = labels.iter().filter(|&&y| y > 0.5).count() as f32;
+    let n_neg: f32 = n - n_pos;
+    let hi = (n_pos + 1.0) / (n_pos + 2.0);
+    let lo = 1.0 / (n_neg + 2.0);
+    let targets: Vec<f32> = labels
+        .iter()
+        .map(|&y| if y > 0.5 { hi } else { lo })
+        .collect();
+
+    let mut a = 1.0_f32;
+    let mut b = 0.0_f32;
+    for _ in 0..50 {
+        let mut g_a = 0.0f64; let mut g_b = 0.0f64;
+        let mut h_aa = 0.0f64; let mut h_ab = 0.0f64; let mut h_bb = 0.0f64;
+        for (&s, &t) in scores.iter().zip(targets.iter()) {
+            let z = (a * s + b) as f64;
+            let p = 1.0 / (1.0 + (-z).exp());
+            let err = p - t as f64;
+            let pq  = p * (1.0 - p);
+            g_a += err * s as f64;
+            g_b += err;
+            h_aa += pq * (s as f64) * (s as f64);
+            h_ab += pq * s as f64;
+            h_bb += pq;
+        }
+        // Solve 2x2 Hessian system H · Δ = −g, with tiny ridge for stability.
+        let lambda = 1e-9;
+        h_aa += lambda;
+        h_bb += lambda;
+        let det = h_aa * h_bb - h_ab * h_ab;
+        if det.abs() < 1e-18 { break; }
+        let inv = 1.0 / det;
+        let da = -(h_bb * g_a - h_ab * g_b) * inv;
+        let db = -(-h_ab * g_a + h_aa * g_b) * inv;
+        a += da as f32;
+        b += db as f32;
+        if da.abs() < 1e-7 && db.abs() < 1e-7 { break; }
+    }
+    (a, b)
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────

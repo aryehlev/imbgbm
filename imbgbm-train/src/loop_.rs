@@ -1,4 +1,4 @@
-use imbgbm_calib::{assign_folds, calibrate_tree};
+use imbgbm_calib::{assign_folds, calibrate_tree, calibrate_tree_with_oof, fit_platt};
 use imbgbm_core::{BinnedDataset, BoostingState, Dataset, RowMetadata};
 use imbgbm_infer::{route_all, Model};
 
@@ -40,6 +40,10 @@ pub fn train(dataset: &Dataset, config: &Config) -> Model {
     let mut best_loss = f32::INFINITY;
     let mut rounds_without_improvement = 0usize;
 
+    // Per-row OOF boosted score (used to fit Platt scaling without leakage).
+    let mut oof_predictions: Vec<f32> = vec![init_score; n_rows];
+    let want_platt = config.calibrate && config.platt_scale;
+
     for round in 0..config.n_rounds {
         // ── 1. Gradients ────────────────────────────────────────────────────
         let (g, h) = config.objective.grad_hess(&binned.labels, &state.predictions);
@@ -73,16 +77,32 @@ pub fn train(dataset: &Dataset, config: &Config) -> Model {
         // ── 4. OOF calibration ───────────────────────────────────────────────
         if config.calibrate {
             if let Some(ref fold_assign) = folds {
-                calibrate_tree(
-                    &mut tree,
-                    &binned,
-                    &all_indices,
-                    &state.gradients,
-                    &state.hessians,
-                    fold_assign,
-                    config.k_folds,
-                    config.lambda,
-                );
+                if want_platt {
+                    let per_row_oof = calibrate_tree_with_oof(
+                        &mut tree,
+                        &binned,
+                        &all_indices,
+                        &state.gradients,
+                        &state.hessians,
+                        fold_assign,
+                        config.k_folds,
+                        config.lambda,
+                    );
+                    for row in 0..n_rows {
+                        oof_predictions[row] += config.learning_rate * per_row_oof[row];
+                    }
+                } else {
+                    calibrate_tree(
+                        &mut tree,
+                        &binned,
+                        &all_indices,
+                        &state.gradients,
+                        &state.hessians,
+                        fold_assign,
+                        config.k_folds,
+                        config.lambda,
+                    );
+                }
             }
         }
 
@@ -110,7 +130,14 @@ pub fn train(dataset: &Dataset, config: &Config) -> Model {
         }
     }
 
-    Model::new(trees, config.learning_rate, init_score)
+    let mut model = Model::new(trees, config.learning_rate, init_score);
+
+    // Fit Platt scaling on OOF boosted scores (preserves additive structure).
+    if want_platt {
+        let (a, b) = fit_platt(&oof_predictions, &binned.labels);
+        model = model.with_platt(a, b);
+    }
+    model
 }
 
 fn mean_log_loss(labels: &[f32], preds: &[f32]) -> f32 {
