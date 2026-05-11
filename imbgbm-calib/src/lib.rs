@@ -165,6 +165,14 @@ pub fn calibrate_tree(
 ) {
     let n_leaves = tree.structure.n_leaves;
 
+    // Global positive rate — used as a Bayesian prior to prevent per-leaf
+    // empirical rates from collapsing to 0 when a fold sees only 1–2 positives.
+    let n_pos: f32 = data.labels.iter().filter(|&&y| y > 0.5).count() as f32;
+    let global_prior = (n_pos / data.labels.len() as f32).clamp(1e-4, 1.0 - 1e-4);
+    // Pseudo-count: equivalent to having seen `smoothing` extra examples with
+    // the base rate. Larger values shrink aggressively toward the prior.
+    let smoothing = 10.0_f32;
+
     // Per-leaf, per-fold accumulators: [fold][leaf].
     let mut fold_sum_g   = vec![vec![0.0f32; n_leaves]; k_folds];
     let mut fold_sum_h   = vec![vec![0.0f32; n_leaves]; k_folds];
@@ -197,8 +205,13 @@ pub fn calibrate_tree(
         for k in 0..k_folds {
             if fold_sum_h[k][l] > 0.0 && fold_total[k][l] > 0 {
                 let val = -fold_sum_g[k][l] / (fold_sum_h[k][l] + lambda);
-                let rate = fold_pos[k][l] as f32 / fold_total[k][l] as f32;
-                let w    = fold_total[k][l] as f32;
+                // Beta-prior smoothing: prevents collapse to 0 when the OOF
+                // fold has few positives (common with 5% imbalance + K=5 folds).
+                let count_pos   = fold_pos[k][l] as f32;
+                let count_total = fold_total[k][l] as f32;
+                let rate = (count_pos + global_prior * smoothing)
+                    / (count_total + smoothing);
+                let w    = count_total;
                 oof_pairs.push((val, rate, w));
             }
         }

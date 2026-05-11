@@ -48,6 +48,9 @@ enum Commands {
         fold_strategy: String,
         #[arg(long, default_value_t = 42)]
         seed: u64,
+        /// Early-stopping patience in rounds (0 = disabled)
+        #[arg(long, default_value_t = 20)]
+        early_stopping_rounds: usize,
     },
     /// Predict probabilities for a feature CSV (no label column, no header).
     Predict {
@@ -67,6 +70,7 @@ fn main() {
         Commands::Train {
             input, output, loss, n_rounds, learning_rate, max_depth,
             subsample, gamma, alpha, calibrate, fold_strategy, seed,
+            early_stopping_rounds,
         } => {
             let (features, labels) = load_csv_with_label(&input);
             let rows: Vec<&[f32]> = features.iter().map(|r| r.as_slice()).collect();
@@ -97,7 +101,7 @@ fn main() {
                 objective,
                 sampler: Arc::new(UniformSampler::new(subsample, seed)),
                 splitter: Arc::new(StandardSplitter),
-                early_stopping_rounds: Some(10),
+                early_stopping_rounds: if early_stopping_rounds == 0 { None } else { Some(early_stopping_rounds) },
                 seed,
             };
 
