@@ -95,10 +95,6 @@ enum Commands {
         /// --estimate-pu-rate at train time).
         #[arg(long)]
         pu: bool,
-        /// Apply leaf-confidence shrinkage with the given alpha (0 = off).
-        /// Tiny leaves get pulled toward zero; reduces overbidding noise.
-        #[arg(long, default_value_t = 0.0)]
-        shrink_alpha: f32,
         /// Use OOF isotonic calibrated probabilities (requires --raw-isotonic at train time).
         #[arg(long)]
         raw_isotonic: bool,
@@ -134,8 +130,11 @@ fn main() {
             };
 
             let fs = match fold_strategy.as_str() {
-                "temporal" => FoldStrategy::Temporal,
-                _          => FoldStrategy::Random { seed },
+                "temporal" => {
+                    eprintln!("error: --fold-strategy temporal requires timestamp metadata which the CLI does not yet parse.");
+                    std::process::exit(1);
+                }
+                _ => FoldStrategy::Random { seed },
             };
 
             let config = Config {
@@ -172,7 +171,7 @@ fn main() {
             eprintln!("Model → {output}");
         }
 
-        Commands::Predict { input, model, calibrated, platt, pu, shrink_alpha: _, raw_isotonic } => {
+        Commands::Predict { input, model, calibrated, platt, pu, raw_isotonic } => {
             let rows = load_csv_features(&input);
             let json = std::fs::read_to_string(&model).expect("could not read model");
             let m = Model::from_json(&json).expect("model parse error");

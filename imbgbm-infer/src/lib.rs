@@ -111,10 +111,16 @@ impl Model {
     }
 
     /// Predict the *true* positive probability under SCAR by dividing the
-    /// Platt-or-raw probability by the estimated PU label rate `c`. Falls back
-    /// to `predict_proba_platt` (or raw) if `c` is not set.
+    /// best available probability by the estimated PU label rate `c`.
+    /// Priority: raw_iso > platt > raw. Falls back to best available if `c` is not set.
     pub fn predict_proba_pu(&self, features: &[f32]) -> f32 {
-        let p_s = self.predict_proba_platt(features);
+        let p_s = if !self.raw_iso_cal.is_empty() {
+            self.predict_proba_raw_iso(features)
+        } else if self.platt.is_some() {
+            self.predict_proba_platt(features)
+        } else {
+            self.predict_proba_raw(features)
+        };
         match self.pu_label_rate {
             Some(c) => (p_s / c.max(1e-3)).clamp(0.0, 1.0),
             None => p_s,

@@ -63,7 +63,7 @@ impl PyModel {
     gamma = 2.0,
     alpha = 0.25,
     calibrate = true,
-    raw_isotonic = true,
+    raw_isotonic = false,
     fold_strategy = "random",
     seed = 42
 ))]

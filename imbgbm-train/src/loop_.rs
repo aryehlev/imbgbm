@@ -95,9 +95,12 @@ pub fn train(dataset: &Dataset, config: &Config) -> Model {
                     for row in 0..n_rows {
                         oof_predictions[row] += config.learning_rate * per_row_oof[row];
                     }
-                } else {
-                    // Per-leaf OOF positive-rate calibration (also used as
-                    // fallback when raw_isotonic is on and caller uses calibrated mode).
+                } else if !want_raw_iso {
+                    // Per-leaf OOF positive-rate calibration.
+                    // Skipped when raw_isotonic=true: the isotonic path trains K
+                    // separate fold models with calibrate=false, so the main model
+                    // must also stay raw — otherwise the score distributions diverge
+                    // and the isotonic mapping is applied out-of-distribution.
                     calibrate_tree(
                         &mut tree,
                         &binned,

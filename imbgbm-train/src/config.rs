@@ -60,9 +60,9 @@ pub struct Config {
 }
 
 impl Config {
-    /// Default configuration: BCE loss + adaptive sampler + OOF isotonic calibration.
-    /// Benchmarked to beat CatBoost on all 7 metrics (AUC, PR-AUC, R@1%, P@5%,
-    /// ECE, Brier, LogLoss) on imbalanced binary classification tasks.
+    /// Default configuration: BCE loss + adaptive sampler + per-leaf OOF calibration.
+    /// Good out-of-the-box for imbalanced binary classification. For the highest
+    /// probability resolution (ECE matching CatBoost), also set `raw_isotonic: true`.
     pub fn default_bce() -> Self {
         use imbgbm_loss::BCELoss;
         use imbgbm_sample::AdaptiveSampler;
@@ -85,7 +85,7 @@ impl Config {
             splitter: Arc::new(StandardSplitter),
             early_stopping_rounds: Some(20),
             platt_scale: false,
-            raw_isotonic: true,
+            raw_isotonic: false,
             seed: 42,
         }
     }

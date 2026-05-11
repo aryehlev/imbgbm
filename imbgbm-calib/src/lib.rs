@@ -322,9 +322,21 @@ pub fn fit_raw_isotonic(oof_scores: &[f32], labels: &[f32]) -> (Vec<f32>, Vec<f3
     let mut order: Vec<usize> = (0..oof_scores.len()).collect();
     order.sort_by(|&a, &b| oof_scores[a].partial_cmp(&oof_scores[b]).unwrap_or(std::cmp::Ordering::Equal));
 
-    let pairs: Vec<(f32, f32, f32)> = order.iter()
-        .map(|&i| (oof_scores[i], labels[i], 1.0_f32))
-        .collect();
+    // Aggregate tied scores before PAV: identical raw scores must map to the
+    // same probability, otherwise PAV gives order-dependent results for ties.
+    let mut pairs: Vec<(f32, f32, f32)> = Vec::new();
+    let mut i = 0;
+    while i < order.len() {
+        let s = oof_scores[order[i]];
+        let mut sum_y = 0.0f32;
+        let mut count = 0.0f32;
+        while i < order.len() && (oof_scores[order[i]] - s).abs() < 1e-9 {
+            sum_y += labels[order[i]];
+            count += 1.0;
+            i += 1;
+        }
+        pairs.push((s, sum_y / count, count));
+    }
 
     let calibrated = isotonic_regression(&pairs);
 
