@@ -195,9 +195,16 @@ TE_CSV = f"{BENCH_DIR}/test_enc.csv"
 np.savetxt(TR_CSV, np.c_[X_tr_enc, y_tr], delimiter=",", fmt="%.6f")
 np.savetxt(TE_CSV, X_te_enc,              delimiter=",", fmt="%.6f")
 
+# Raw CSVs (integer-coded categoricals — for imbgbm native cat support)
+TR_RAW_CSV = f"{BENCH_DIR}/train_raw.csv"
+TE_RAW_CSV = f"{BENCH_DIR}/test_raw.csv"
+np.savetxt(TR_RAW_CSV, np.c_[X_tr, y_tr], delimiter=",", fmt="%.6f")
+np.savetxt(TE_RAW_CSV, X_te,              delimiter=",", fmt="%.6f")
+
 # Cat feature indices for CatBoost (raw integer columns in X_tr_raw)
 # CatBoost handles them natively — this is CatBoost's main edge
 CAT_FEATURE_IDX = list(range(cat_start, X_all.shape[1]))
+CAT_FEATURES_STR = ",".join(str(i) for i in CAT_FEATURE_IDX)
 
 # ── Metric helpers ────────────────────────────────────────────────────────────
 TOP_FRAC = 0.03   # 3% = approximately 1× the positive rate
@@ -352,6 +359,36 @@ run_cli(["train", "--input", TR_CSV, "--output", f"{BENCH_DIR}/m_liftboost.json"
 r = run_cli(["predict", "--input", TE_CSV, "--model", f"{BENCH_DIR}/m_liftboost.json",
              "--calibrated"])
 evaluate("imbgbm LiftBoost (PM+Tail)", y_te, read_probs(r.stdout), time.time()-t0)
+
+# ── 8. imbgbm Standard + native categorical support ───────────────────────────
+print(SEP)
+print("8. imbgbm Standard + native OOF target-encoded cats (raw integer input)")
+t0 = time.time()
+run_cli(["train", "--input", TR_RAW_CSV, "--output", f"{BENCH_DIR}/m_std_cats.json",
+         "--loss", "bce", "--n-rounds", "500", "--learning-rate", "0.05",
+         "--max-depth", "6", "--sampler", "adaptive", "--subsample", "0.5",
+         "--col-subsample", "0.8", "--calibrate", "--early-stopping-rounds", "30",
+         "--min-samples-leaf", "20",
+         "--cat-features", CAT_FEATURES_STR])
+r = run_cli(["predict", "--input", TE_RAW_CSV, "--model", f"{BENCH_DIR}/m_std_cats.json",
+             "--calibrated"])
+evaluate("imbgbm Standard (native cats)", y_te, read_probs(r.stdout), time.time()-t0)
+
+# ── 9. imbgbm LiftBoost + native categorical support ──────────────────────────
+print(SEP)
+print("9. imbgbm LiftBoost PM+Tail + native OOF target-encoded cats")
+t0 = time.time()
+run_cli(["train", "--input", TR_RAW_CSV, "--output", f"{BENCH_DIR}/m_liftboost_cats.json",
+         "--loss", "bce", "--n-rounds", "500", "--learning-rate", "0.05",
+         "--max-depth", "6", "--sampler", "adaptive", "--subsample", "0.5",
+         "--col-subsample", "0.8", "--calibrate", "--early-stopping-rounds", "30",
+         "--min-samples-leaf", "20",
+         "--splitter", "positive-mass", "--pm-alpha", "1.0", "--pm-min-pos-leaf", "5",
+         "--tail-weight", "--tail-top-rate", "0.03", "--tail-start-round", "200",
+         "--cat-features", CAT_FEATURES_STR])
+r = run_cli(["predict", "--input", TE_RAW_CSV, "--model", f"{BENCH_DIR}/m_liftboost_cats.json",
+             "--calibrated"])
+evaluate("imbgbm LiftBoost (PM+Tail+Cats)", y_te, read_probs(r.stdout), time.time()-t0)
 
 # ── Summary ────────────────────────────────────────────────────────────────────
 print()

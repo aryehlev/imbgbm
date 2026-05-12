@@ -114,6 +114,12 @@ pub struct Config {
     /// See `TailWeightConfig` for the weighting scheme.
     pub tail_weight: Option<TailWeightConfig>,
 
+    // ── Categorical features ──────────────────────────────────────────────────
+    /// Column indices (0-based) that contain integer-encoded categorical values.
+    /// These receive OOF Bayesian target encoding during training (no leakage)
+    /// and full-dataset encoding stored on the model for inference.
+    pub cat_features: Vec<usize>,
+
     pub seed: u64,
 }
 
@@ -145,6 +151,7 @@ impl Config {
             platt_scale: false,
             raw_isotonic: false,
             tail_weight: None,
+            cat_features: vec![],
             seed: 42,
         }
     }
@@ -173,6 +180,7 @@ impl Config {
             platt_scale: false,
             raw_isotonic: false,
             tail_weight: None,
+            cat_features: vec![],
             seed: 42,
         }
     }
@@ -222,6 +230,7 @@ impl Config {
             platt_scale: false,
             raw_isotonic: false,
             tail_weight: Some(TailWeightConfig::top1pct().starting_at(200)),
+            cat_features: vec![],
             seed: 42,
         }
     }

@@ -97,6 +97,11 @@ enum Commands {
         /// Round at which tail weighting activates (0 = from round 1).
         #[arg(long, default_value_t = 0_usize)]
         tail_start_round: usize,
+        /// Comma-separated 0-based column indices for integer-encoded categorical features.
+        /// Example: "6,7,8" for the last three columns.  These receive OOF Bayesian
+        /// target encoding so no leakage occurs during training.
+        #[arg(long, default_value = "")]
+        cat_features: String,
     },
     /// Predict probabilities for a feature CSV (no label column, no header).
     Predict {
@@ -139,7 +144,7 @@ fn main() {
             subsample, sampler, gamma, alpha, calibrate, platt, fold_strategy, seed,
             early_stopping_rounds, col_subsample, lambda, min_samples_leaf, min_child_weight,
             raw_isotonic, splitter, purity_lambda, pm_alpha, pm_min_pos_leaf,
-            tail_weight, tail_top_rate, tail_start_round,
+            tail_weight, tail_top_rate, tail_start_round, cat_features,
         } => {
             let (features, labels) = load_csv_with_label(&input);
             let rows: Vec<&[f32]> = features.iter().map(|r| r.as_slice()).collect();
@@ -164,6 +169,14 @@ fn main() {
                     PositiveMassSplitter::new(pm_alpha, pm_min_pos_leaf)
                 ),
                 _ => Arc::new(StandardSplitter),
+            };
+
+            let cat_feature_indices: Vec<usize> = if cat_features.is_empty() {
+                vec![]
+            } else {
+                cat_features.split(',')
+                    .map(|s| s.trim().parse::<usize>().expect("invalid --cat-features index"))
+                    .collect()
             };
 
             let tail_weight_cfg = if tail_weight {
@@ -195,6 +208,7 @@ fn main() {
                 platt_scale: platt,
                 raw_isotonic,
                 tail_weight: tail_weight_cfg,
+                cat_features: cat_feature_indices,
                 seed,
             };
 

@@ -6,7 +6,13 @@ use crate::{builder::grow_tree, config::{Config, TailWeightConfig}};
 
 /// Train an imbgbm model.
 pub fn train(dataset: &Dataset, config: &Config) -> Model {
-    let binned = BinnedDataset::from_dataset(dataset, config.n_bins);
+    let (binned, cat_encodings) = if config.cat_features.is_empty() {
+        (BinnedDataset::from_dataset(dataset, config.n_bins), vec![])
+    } else {
+        BinnedDataset::from_dataset_with_cats(
+            dataset, config.n_bins, &config.cat_features, config.k_folds, config.seed,
+        )
+    };
     let n_rows = binned.n_rows;
 
     // Resolve metadata: use the config-supplied one or an empty default.
@@ -155,6 +161,10 @@ pub fn train(dataset: &Dataset, config: &Config) -> Model {
 
     let mut model = Model::new(trees, config.learning_rate, init_score);
 
+    if !cat_encodings.is_empty() {
+        model.cat_encodings = cat_encodings;
+    }
+
     // Fit Platt scaling on OOF boosted scores (preserves additive structure).
     if want_platt {
         let (a, b) = fit_platt(&oof_predictions, &binned.labels);
@@ -219,6 +229,7 @@ fn collect_kfold_raw_oof_scores(dataset: &Dataset, config: &Config) -> Vec<f32> 
             platt_scale:            false,
             raw_isotonic:           false,
             tail_weight:            config.tail_weight.clone(),
+            cat_features:           config.cat_features.clone(),
             seed:                   config.seed.wrapping_add(fold as u64 * 0x9e3779b9u64),
         };
 
