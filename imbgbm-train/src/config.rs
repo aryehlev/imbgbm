@@ -112,7 +112,7 @@ impl Config {
             splitter: Arc::new(VarianceAwareSplitter::new(0.1, 5)),
             early_stopping_rounds: Some(20),
             platt_scale: false,
-            raw_isotonic: true,
+            raw_isotonic: false,
             seed: 42,
         }
     }

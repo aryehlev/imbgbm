@@ -10,48 +10,31 @@ use serde::{Deserialize, Serialize};
 /// compact set of breakpoints. At inference, linear interpolation between
 /// adjacent breakpoints gives smooth, monotone probabilities.
 ///
-/// Because OOF leaf values (trained on K-1 folds) have slightly higher variance
-/// than the full model's leaf values (weighted mean of K folds), we store a
-/// linear alignment (scale, offset) that maps test raw scores into the OOF
-/// score space before lookup. This corrects the small distribution shift and
-/// prevents the isotonic from being applied out-of-range.
-///
-/// Resolution is far higher than per-leaf averaging (std ≈ 0.085 vs 0.008),
-/// matching CatBoost calibration quality while preserving imbgbm's ranking.
+/// Because fold models are trained on K-1/K of the data with identical
+/// hyper-parameters, their raw score distribution matches the final model's
+/// test distribution closely enough that no scale/offset alignment is needed.
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct RawIsoCal {
     /// Sorted OOF raw score breakpoints (compressed block midpoints).
     pub scores: Vec<f32>,
     /// Corresponding calibrated probabilities from isotonic regression.
     pub probs: Vec<f32>,
-    /// Linear scale to map test raw scores into the OOF score space.
-    /// `adjusted = raw * scale + offset`.  Default 1.0 (no correction).
-    #[serde(default = "default_scale")]
-    pub scale: f32,
-    /// Linear offset (see `scale`).  Default 0.0.
-    #[serde(default)]
-    pub offset: f32,
 }
-
-fn default_scale() -> f32 { 1.0 }
 
 impl RawIsoCal {
     pub fn is_empty(&self) -> bool { self.scores.is_empty() }
 
     /// Apply isotonic calibration to a raw boosted score via linear interpolation.
-    /// The score is first adjusted by `scale`/`offset` to align with the OOF
-    /// score distribution that was used to fit the isotonic mapping.
     pub fn predict(&self, raw: f32) -> f32 {
         let n = self.scores.len();
         if n == 0 { return sigmoid(raw); }
-        let adjusted = raw * self.scale + self.offset;
-        if adjusted <= self.scores[0] { return self.probs[0]; }
-        if adjusted >= self.scores[n - 1] { return self.probs[n - 1]; }
-        let pos = self.scores.partition_point(|&x| x < adjusted);
+        if raw <= self.scores[0] { return self.probs[0]; }
+        if raw >= self.scores[n - 1] { return self.probs[n - 1]; }
+        let pos = self.scores.partition_point(|&x| x < raw);
         if pos == 0 { return self.probs[0]; }
         if pos >= n { return self.probs[n - 1]; }
         let lo = pos - 1;
-        let t = (adjusted - self.scores[lo]) / (self.scores[pos] - self.scores[lo] + 1e-9);
+        let t = (raw - self.scores[lo]) / (self.scores[pos] - self.scores[lo] + 1e-9);
         (self.probs[lo] + t * (self.probs[pos] - self.probs[lo])).clamp(0.0, 1.0)
     }
 }
@@ -106,7 +89,7 @@ impl Model {
     }
 
     pub fn with_raw_iso_cal(mut self, scores: Vec<f32>, probs: Vec<f32>) -> Self {
-        self.raw_iso_cal = RawIsoCal { scores, probs, scale: 1.0, offset: 0.0 };
+        self.raw_iso_cal = RawIsoCal { scores, probs };
         self
     }
 

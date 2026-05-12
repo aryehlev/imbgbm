@@ -154,7 +154,7 @@ pub fn train(dataset: &Dataset, config: &Config) -> Model {
     if want_raw_iso {
         let true_oof = collect_kfold_raw_oof_scores(dataset, config);
         let (scores, probs) = fit_raw_isotonic(&true_oof, &binned.labels);
-        model.raw_iso_cal = RawIsoCal { scores, probs, scale: 1.0, offset: 0.0 };
+        model.raw_iso_cal = RawIsoCal { scores, probs };
     }
 
     model
