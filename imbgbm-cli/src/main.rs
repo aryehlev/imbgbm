@@ -154,6 +154,7 @@ fn main() {
                 early_stopping_rounds: if early_stopping_rounds == 0 { None } else { Some(early_stopping_rounds) },
                 platt_scale: platt,
                 raw_isotonic,
+                tail_weight: None,
                 seed,
             };
 

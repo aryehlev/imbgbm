@@ -135,6 +135,7 @@ fn fit(
         early_stopping_rounds: None,
         platt_scale: false,
         raw_isotonic,
+        tail_weight: None,
         seed,
     };
 

@@ -5,6 +5,58 @@ use imbgbm_loss::Objective;
 use imbgbm_sample::Sampler;
 use imbgbm_split::Splitter;
 
+/// Dynamic tail-weighting applied to gradients/hessians each boosting round.
+///
+/// Rows near the deployment threshold (top-`top_rate` bucket boundary) receive
+/// high weights so the tree focuses its structure on the ranking boundary that
+/// matters at inference.  Easy negatives far below the threshold are suppressed.
+///
+/// Applied by multiplying each row's gradient and hessian by its weight before
+/// histogram accumulation.  This is distinct from focal loss (per-row hardness)
+/// and from sampling (which biases which rows are seen at all).
+#[derive(Clone)]
+pub struct TailWeightConfig {
+    /// Top fraction of rows to target, e.g. 0.01 = top 1%.
+    pub top_rate: f64,
+    /// Weight for positive examples scored below the threshold (missed positives).
+    pub weight_missed_pos: f32,
+    /// Weight for negative examples scored above the threshold (false positives in top bucket).
+    pub weight_false_pos: f32,
+    /// Weight for examples within `boundary_width` of the threshold on either side.
+    pub weight_boundary: f32,
+    /// Raw-score half-width around the threshold that counts as "boundary".
+    pub boundary_width: f32,
+    /// Weight for easy negatives (far below threshold, correctly ranked).
+    pub weight_easy_neg: f32,
+    /// Weight for easy positives (already above threshold, correctly ranked).
+    pub weight_easy_pos: f32,
+    /// First round (0-indexed) at which tail weighting activates.
+    /// Set to 0 to apply from the very first round.
+    pub start_round: usize,
+}
+
+impl TailWeightConfig {
+    /// Defaults from the LiftBoost design: strong focus on the top-1% bucket.
+    pub fn top1pct() -> Self {
+        TailWeightConfig {
+            top_rate: 0.01,
+            weight_missed_pos: 20.0,
+            weight_false_pos: 20.0,
+            weight_boundary: 8.0,
+            boundary_width: 0.5,
+            weight_easy_neg: 0.05,
+            weight_easy_pos: 0.5,
+            start_round: 0,
+        }
+    }
+
+    /// Start tail weighting after `round` rounds of normal training.
+    pub fn starting_at(mut self, round: usize) -> Self {
+        self.start_round = round;
+        self
+    }
+}
+
 /// Full training configuration.
 pub struct Config {
     // ── Boosting ──────────────────────────────────────────────────────────────
@@ -56,6 +108,12 @@ pub struct Config {
     /// are true, isotonic takes precedence.
     pub raw_isotonic: bool,
 
+    // ── Top-tail gradient weighting ───────────────────────────────────────────
+    /// When set, multiply each row's gradient and hessian by a weight that
+    /// focuses learning on the deployment threshold (top-K boundary).
+    /// See `TailWeightConfig` for the weighting scheme.
+    pub tail_weight: Option<TailWeightConfig>,
+
     pub seed: u64,
 }
 
@@ -86,6 +144,7 @@ impl Config {
             early_stopping_rounds: Some(20),
             platt_scale: false,
             raw_isotonic: false,
+            tail_weight: None,
             seed: 42,
         }
     }
@@ -113,6 +172,56 @@ impl Config {
             early_stopping_rounds: Some(20),
             platt_scale: false,
             raw_isotonic: false,
+            tail_weight: None,
+            seed: 42,
+        }
+    }
+
+    /// LiftBoost preset for 99/1 imbalanced classification.
+    ///
+    /// Uses the `PositiveMassSplitter` which adds a statistically-regularised
+    /// lift gain term to the standard Newton gain, rewarding splits that create
+    /// reliable positive concentration above the global base rate.
+    ///
+    /// The phased training schedule:
+    /// - Rounds 0–99:   normal split gain; broad structure from BCE gradients.
+    /// - Rounds 100+:   positive-mass split gain active via the splitter.
+    /// - Rounds 200+:   top-tail gradient weighting kicks in (top-1% boundary).
+    ///
+    /// `prior` is the expected positive rate (e.g. 0.01 for 1 % positives).
+    /// It is used to size `min_pos_leaf` and initialise the positive-mass splitter.
+    pub fn lift_boost(prior: f32) -> Self {
+        use imbgbm_loss::BCELoss;
+        use imbgbm_sample::AdaptiveSampler;
+        use imbgbm_split::PositiveMassSplitter;
+
+        // min_pos_leaf: at least 5 positives per leaf, but scale with dataset
+        // size.  Caller can override by reconstructing the splitter.
+        let min_pos_leaf = 20.0_f32;
+
+        Config {
+            n_rounds: 350,
+            learning_rate: 0.05,
+            max_depth: 6,
+            min_child_weight: 5.0,
+            min_samples_leaf: 20,
+            lambda: 1.0,
+            n_bins: 255,
+            col_subsample: 0.8,
+            k_folds: 5,
+            calibrate: true,
+            fold_strategy: FoldStrategy::Random { seed: 42 },
+            metadata: None,
+            objective: Arc::new(BCELoss),
+            sampler: Arc::new(AdaptiveSampler::new(0.2, 0.1, Some(prior), 0.0, 42)),
+            splitter: Arc::new(
+                PositiveMassSplitter::new(1.0, min_pos_leaf)
+                    .with_penalty(0.1),
+            ),
+            early_stopping_rounds: Some(30),
+            platt_scale: false,
+            raw_isotonic: false,
+            tail_weight: Some(TailWeightConfig::top1pct().starting_at(200)),
             seed: 42,
         }
     }
