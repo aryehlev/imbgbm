@@ -19,6 +19,11 @@ fn beta_lcb(pos: f64, total: f64, z: f64) -> f64 {
 /// Positive-mass gain: reward splits that create statistically reliable
 /// positive concentration above the global base rate in each child.
 ///
+/// The gain is normalised by `total_pos` (total positives in the node) so
+/// that it is scale-invariant across node sizes and comparable across rounds.
+/// After normalisation the gain is bounded by `ln(1 + 1/global_rate)` per
+/// child, making α in the range 0.1–2.0 consistently meaningful.
+///
 /// Only children with at least `min_pos_leaf` positives contribute.
 /// Uses Wilson LCB to avoid rewarding fluky small-positive leaves.
 fn positive_mass_gain(
@@ -26,21 +31,23 @@ fn positive_mass_gain(
     left_total: f64,
     right_pos: f64,
     right_total: f64,
+    total_pos: f64,
     global_rate: f64,
     min_pos_leaf: f64,
     z: f64,
 ) -> f64 {
     let base = global_rate.max(1e-12);
+    let norm = total_pos.max(1.0);
     let mut gain = 0.0;
     if left_pos >= min_pos_leaf {
         let lcb = beta_lcb(left_pos, left_total, z);
         let lift = (lcb / base).max(1e-12);
-        gain += left_pos * lift.ln_1p();
+        gain += (left_pos / norm) * lift.ln_1p();
     }
     if right_pos >= min_pos_leaf {
         let lcb = beta_lcb(right_pos, right_total, z);
         let lift = (lcb / base).max(1e-12);
-        gain += right_pos * lift.ln_1p();
+        gain += (right_pos / norm) * lift.ln_1p();
     }
     gain
 }
@@ -269,6 +276,7 @@ fn best_split_positive_mass(
 
         let total = hist.total();
         let (tot_g, tot_h) = (total.sum_g, total.sum_h);
+        let total_pos = total.count_pos as f64;
 
         let mut left_g = 0.0_f32;
         let mut left_h = 0.0_f32;
@@ -296,29 +304,29 @@ fn best_split_positive_mass(
 
             let std_gain = newton_gain(tot_g, tot_h, left_g, left_h, right_g, right_h, lambda);
 
+            // pm_gain is normalised by total node positives so α is scale-invariant.
             let pm_gain = positive_mass_gain(
                 left_count_pos as f64,
                 left_count as f64,
                 right_count_pos as f64,
                 right_count as f64,
+                total_pos,
                 global_rate,
                 min_pos_leaf,
                 lcb_z,
             );
 
-            // Penalise children that have some positives but below the minimum —
-            // they are too small to produce reliable lift estimates.
-            let tiny_penalty = {
-                let mut p = 0.0_f64;
+            // Optional penalty for children with 1..min_pos_leaf positives.
+            // These children don't contribute pm_gain but still represent
+            // fragmented positive mass.  Zero by default.
+            let tiny_penalty = if tiny_leaf_penalty > 0.0 {
                 let lp = left_count_pos as f64;
                 let rp = right_count_pos as f64;
-                if lp > 0.0 && lp < min_pos_leaf {
-                    p += tiny_leaf_penalty * lp;
-                }
-                if rp > 0.0 && rp < min_pos_leaf {
-                    p += tiny_leaf_penalty * rp;
-                }
-                p
+                let lpen = if lp > 0.0 && lp < min_pos_leaf { tiny_leaf_penalty * (lp / total_pos.max(1.0)) } else { 0.0 };
+                let rpen = if rp > 0.0 && rp < min_pos_leaf { tiny_leaf_penalty * (rp / total_pos.max(1.0)) } else { 0.0 };
+                lpen + rpen
+            } else {
+                0.0
             };
 
             let score = std_gain as f64 + alpha * pm_gain - tiny_penalty;
