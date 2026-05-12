@@ -46,8 +46,7 @@ enum Commands {
         #[arg(long)]
         calibrate: bool,
         /// Fit Platt scaling on OOF boosted scores (requires --calibrate).
-        /// Preserves additive boosting structure; superior to per-leaf averaging
-        /// for fixing focal-loss miscalibration.
+        /// Preserves additive boosting structure.
         #[arg(long)]
         platt: bool,
         /// Fold strategy for OOF calibration: random | temporal
@@ -73,8 +72,7 @@ enum Commands {
         #[arg(long, default_value_t = 1.0)]
         min_child_weight: f32,
         /// Fit OOF isotonic calibration on raw boosted scores (requires --calibrate).
-        /// Gives ~10× higher probability resolution than per-leaf averaging, matching
-        /// CatBoost Brier/LogLoss while preserving imbgbm's superior ranking.
+        /// Trains K fold models and fits PAV isotonic regression on held-out scores.
         /// Mutually exclusive with --platt; isotonic takes precedence when both set.
         #[arg(long)]
         raw_isotonic: bool,

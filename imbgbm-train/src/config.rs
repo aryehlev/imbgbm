@@ -51,9 +51,9 @@ pub struct Config {
     /// (unlike per-leaf probability averaging).
     pub platt_scale: bool,
     /// When true and `calibrate` is also true, fit an isotonic calibration mapping
-    /// on OOF raw scores. Gives ~10× higher probability resolution than per-leaf
-    /// averaging while keeping ECE near CatBoost. Mutually exclusive with
-    /// `platt_scale`; if both are true, isotonic takes precedence.
+    /// on OOF raw scores. Trains K fold models and fits PAV isotonic regression on
+    /// their held-out raw scores. Mutually exclusive with `platt_scale`; if both
+    /// are true, isotonic takes precedence.
     pub raw_isotonic: bool,
 
     pub seed: u64,
@@ -61,8 +61,8 @@ pub struct Config {
 
 impl Config {
     /// Default configuration: BCE loss + adaptive sampler + per-leaf OOF calibration.
-    /// Good out-of-the-box for imbalanced binary classification. For the highest
-    /// probability resolution (ECE matching CatBoost), also set `raw_isotonic: true`.
+    /// For post-hoc isotonic calibration on raw scores, also set `raw_isotonic: true`
+    /// (requires training K fold models; ~K× slower).
     pub fn default_bce() -> Self {
         use imbgbm_loss::BCELoss;
         use imbgbm_sample::AdaptiveSampler;

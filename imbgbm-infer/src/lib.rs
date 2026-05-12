@@ -47,7 +47,7 @@ impl RawIsoCal {
 /// - **Raw**: sigmoid of cumulative Newton-step leaf values.
 /// - **Calibrated**: average per-leaf OOF positive rates across trees.
 /// - **Platt**: sigmoid(a * raw_score + b), preserves additive structure.
-/// - **RawIso**: isotonic-calibrated raw score — highest resolution + best ECE.
+/// - **RawIso**: isotonic-calibrated raw score via OOF PAV mapping.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Model {
     pub trees: Vec<CalibratedTree>,
@@ -63,9 +63,8 @@ pub struct Model {
     /// probability, recovering the true positive probability under SCAR.
     #[serde(default)]
     pub pu_label_rate: Option<f32>,
-    /// OOF isotonic calibration on raw scores. When non-empty, use
-    /// `predict_proba_raw_iso()` for probability estimation. Gives ~10× higher
-    /// resolution than per-leaf averaging while maintaining ECE near CatBoost's.
+    /// OOF isotonic calibration on raw scores. When non-empty,
+    /// `predict_proba_raw_iso()` uses this mapping instead of sigmoid.
     #[serde(default)]
     pub raw_iso_cal: RawIsoCal,
 }
@@ -148,9 +147,6 @@ impl Model {
     }
 
     /// Predict probability using the OOF isotonic calibration of the raw score.
-    ///
-    /// Gives 10× higher resolution than per-leaf averaging, matching CatBoost-level
-    /// Brier/LogLoss while preserving imbgbm's superior AUC and ranking metrics.
     /// Falls back to `predict_proba_raw` if no calibration mapping is stored.
     pub fn predict_proba_raw_iso(&self, features: &[f32]) -> f32 {
         if self.raw_iso_cal.is_empty() {
