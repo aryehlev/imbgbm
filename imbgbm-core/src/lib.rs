@@ -1,9 +1,11 @@
+pub mod categorical;
 pub mod dataset;
 pub mod histogram;
 pub mod metadata;
 pub mod state;
 pub mod tree;
 
+pub use categorical::CatEncoding;
 pub use dataset::{BinnedDataset, Dataset, MAX_BINS};
 pub use histogram::{BinStats, Histogram};
 pub use metadata::RowMetadata;

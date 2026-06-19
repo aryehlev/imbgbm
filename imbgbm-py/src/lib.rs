@@ -65,6 +65,7 @@ impl PyModel {
     calibrate = true,
     raw_isotonic = false,
     fold_strategy = "random",
+    cat_features = None,
     seed = 42
 ))]
 fn fit(
@@ -81,6 +82,7 @@ fn fit(
     calibrate: bool,
     raw_isotonic: bool,
     fold_strategy: &str,
+    cat_features: Option<Vec<usize>>,
     seed: u64,
 ) -> PyResult<PyModel> {
     if x.is_empty() {
@@ -135,6 +137,8 @@ fn fit(
         early_stopping_rounds: None,
         platt_scale: false,
         raw_isotonic,
+        tail_weight: None,
+        cat_features: cat_features.unwrap_or_default(),
         seed,
     };
 

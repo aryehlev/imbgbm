@@ -1,4 +1,4 @@
-use imbgbm_core::{CalibratedTree, NodeKind};
+use imbgbm_core::{CalibratedTree, CatEncoding, NodeKind};
 use serde::{Deserialize, Serialize};
 
 // ── Raw isotonic calibration lookup table ────────────────────────────────────
@@ -67,6 +67,11 @@ pub struct Model {
     /// `predict_proba_raw_iso()` uses this mapping instead of sigmoid.
     #[serde(default)]
     pub raw_iso_cal: RawIsoCal,
+    /// Target encodings for categorical features.  Stored on the model for
+    /// inference: each encoding maps raw integer category codes to smoothed
+    /// mean target values computed on the full training set.
+    #[serde(default)]
+    pub cat_encodings: Vec<CatEncoding>,
 }
 
 impl Model {
@@ -74,7 +79,28 @@ impl Model {
         Model {
             trees, learning_rate, init_score,
             platt: None, pu_label_rate: None, raw_iso_cal: RawIsoCal::default(),
+            cat_encodings: vec![],
         }
+    }
+
+    pub fn with_cat_encodings(mut self, encodings: Vec<CatEncoding>) -> Self {
+        self.cat_encodings = encodings;
+        self
+    }
+
+    /// Apply target encodings for categorical columns in-place on a feature slice.
+    /// Returns a `Cow` so the allocation is skipped when there are no cat encodings.
+    fn apply_cat_encodings<'a>(&self, features: &'a [f32]) -> std::borrow::Cow<'a, [f32]> {
+        if self.cat_encodings.is_empty() {
+            return std::borrow::Cow::Borrowed(features);
+        }
+        let mut encoded = features.to_vec();
+        for enc in &self.cat_encodings {
+            if enc.col_idx < encoded.len() {
+                encoded[enc.col_idx] = enc.encode(encoded[enc.col_idx]);
+            }
+        }
+        std::borrow::Cow::Owned(encoded)
     }
 
     pub fn with_platt(mut self, a: f32, b: f32) -> Self {
@@ -112,9 +138,10 @@ impl Model {
 
     /// Predict the raw log-odds sum for a single example.
     pub fn predict_raw(&self, features: &[f32]) -> f32 {
+        let features = self.apply_cat_encodings(features);
         self.trees
             .iter()
-            .map(|t| t.predict_raw(features))
+            .map(|t| t.predict_raw(&features))
             .sum::<f32>()
             * self.learning_rate
             + self.init_score
@@ -133,7 +160,8 @@ impl Model {
         if self.trees.is_empty() {
             return 0.5;
         }
-        let sum: f32 = self.trees.iter().map(|t| t.predict_prob(features)).sum();
+        let features = self.apply_cat_encodings(features);
+        let sum: f32 = self.trees.iter().map(|t| t.predict_prob(&features)).sum();
         sum / self.trees.len() as f32
     }
 

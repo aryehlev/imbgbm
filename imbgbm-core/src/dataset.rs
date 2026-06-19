@@ -125,6 +125,52 @@ impl BinnedDataset {
         }
     }
 
+    /// Quantile-bin a `Dataset` with OOF target encoding for categorical columns.
+    ///
+    /// Returns `(BinnedDataset, Vec<CatEncoding>)`.  The binned dataset uses
+    /// out-of-fold TE values for cat columns (no leakage during training).
+    /// The returned `CatEncoding` values use the full dataset and are stored in
+    /// the model for inference.
+    pub fn from_dataset_with_cats(
+        dataset: &Dataset,
+        n_bins: usize,
+        cat_features: &[usize],
+        k_folds: usize,
+        seed: u64,
+    ) -> (Self, Vec<crate::categorical::CatEncoding>) {
+        use crate::categorical::{fit_target_encoding, CatEncoding};
+
+        if cat_features.is_empty() {
+            return (Self::from_dataset(dataset, n_bins), vec![]);
+        }
+
+        let mut new_features = dataset.features.clone();
+        let mut encodings: Vec<CatEncoding> = Vec::with_capacity(cat_features.len());
+
+        for &col_idx in cat_features {
+            assert!(col_idx < dataset.n_cols, "cat_features index {col_idx} out of range");
+            let (oof_values, inference_enc) = fit_target_encoding(
+                &dataset.features[col_idx],
+                &dataset.labels,
+                k_folds,
+                10.0,
+                col_idx,
+                seed.wrapping_add(col_idx as u64 * 0x9e3779b97f4a7c15),
+            );
+            new_features[col_idx] = oof_values;
+            encodings.push(inference_enc);
+        }
+
+        let oof_dataset = Dataset {
+            features: new_features,
+            labels: dataset.labels.clone(),
+            n_rows: dataset.n_rows,
+            n_cols: dataset.n_cols,
+        };
+
+        (Self::from_dataset(&oof_dataset, n_bins), encodings)
+    }
+
     /// Number of effective bins for a given column.
     pub fn n_bins_for_col(&self, col: usize) -> usize {
         self.bin_thresholds[col].len()

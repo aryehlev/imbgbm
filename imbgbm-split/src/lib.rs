@@ -1,5 +1,57 @@
 use imbgbm_core::{BinStats, Histogram};
 
+// ── Positive-mass helpers ─────────────────────────────────────────────────────
+
+/// Wilson score lower confidence bound for a binomial proportion.
+/// Returns the conservative lower bound on the true positive rate.
+fn beta_lcb(pos: f64, total: f64, z: f64) -> f64 {
+    if total <= 0.0 {
+        return 0.0;
+    }
+    let p = pos / total;
+    let z2 = z * z;
+    let denom = 1.0 + z2 / total;
+    let center = p + z2 / (2.0 * total);
+    let margin = z * ((p * (1.0 - p) / total) + z2 / (4.0 * total * total)).sqrt();
+    ((center - margin) / denom).max(0.0)
+}
+
+/// Positive-mass gain: reward splits that create statistically reliable
+/// positive concentration above the global base rate in each child.
+///
+/// The gain is normalised by `total_pos` (total positives in the node) so
+/// that it is scale-invariant across node sizes and comparable across rounds.
+/// After normalisation the gain is bounded by `ln(1 + 1/global_rate)` per
+/// child, making α in the range 0.1–2.0 consistently meaningful.
+///
+/// Only children with at least `min_pos_leaf` positives contribute.
+/// Uses Wilson LCB to avoid rewarding fluky small-positive leaves.
+fn positive_mass_gain(
+    left_pos: f64,
+    left_total: f64,
+    right_pos: f64,
+    right_total: f64,
+    total_pos: f64,
+    global_rate: f64,
+    min_pos_leaf: f64,
+    z: f64,
+) -> f64 {
+    let base = global_rate.max(1e-12);
+    let norm = total_pos.max(1.0);
+    let mut gain = 0.0;
+    if left_pos >= min_pos_leaf {
+        let lcb = beta_lcb(left_pos, left_total, z);
+        let lift = (lcb / base).max(1e-12);
+        gain += (left_pos / norm) * lift.ln_1p();
+    }
+    if right_pos >= min_pos_leaf {
+        let lcb = beta_lcb(right_pos, right_total, z);
+        let lift = (lcb / base).max(1e-12);
+        gain += (right_pos / norm) * lift.ln_1p();
+    }
+    gain
+}
+
 // ── Split result ─────────────────────────────────────────────────────────────
 
 /// The best split found for a node.
@@ -128,6 +180,175 @@ impl Splitter for VarianceAwareSplitter {
             }
         })
     }
+}
+
+// ── Positive-mass splitter ────────────────────────────────────────────────────
+
+/// LiftBoost split criterion: Newton gain + statistically-regularised lift gain.
+///
+/// For each candidate split the score is:
+///
+///   `score = standard_gain + alpha * positive_mass_gain - tiny_leaf_penalty`
+///
+/// `positive_mass_gain` rewards children that reliably concentrate positive
+/// examples above the global base rate, using a Wilson confidence lower bound
+/// so that leaves with very few positives do not look artificially attractive.
+///
+/// `tiny_leaf_penalty` (per positive in an undersized leaf) discourages
+/// splits that scatter rare positives into statistically unreliable leaves.
+pub struct PositiveMassSplitter {
+    /// Weight on the positive-mass gain term (α).  Typical range: 0.3–2.0.
+    pub alpha: f32,
+    /// Minimum positives required in a child for it to contribute lift gain.
+    /// Children below this threshold incur the tiny-leaf penalty instead.
+    pub min_pos_leaf: f32,
+    /// z-score for the Wilson lower confidence bound.  1.96 ≈ 95 % one-sided.
+    pub lcb_z: f32,
+    /// Per-positive penalty for a child with fewer positives than `min_pos_leaf`.
+    pub tiny_leaf_penalty: f32,
+}
+
+impl PositiveMassSplitter {
+    /// Construct with sensible defaults for 99/1 imbalanced data.
+    ///
+    /// `prior` is the global positive rate (e.g. 0.01 for 1 % positives).
+    /// `min_pos_leaf` defaults to `max(5, 0.001 * total_positives)` at call
+    /// time; pass an explicit override to tighten or loosen the guard.
+    pub fn new(alpha: f32, min_pos_leaf: f32) -> Self {
+        PositiveMassSplitter {
+            alpha,
+            min_pos_leaf,
+            lcb_z: 1.96,
+            tiny_leaf_penalty: 0.0,
+        }
+    }
+
+    pub fn with_penalty(mut self, tiny_leaf_penalty: f32) -> Self {
+        self.tiny_leaf_penalty = tiny_leaf_penalty;
+        self
+    }
+
+    pub fn with_lcb_z(mut self, z: f32) -> Self {
+        self.lcb_z = z;
+        self
+    }
+}
+
+impl Splitter for PositiveMassSplitter {
+    fn find_best_split(
+        &self,
+        histograms: &[Histogram],
+        prior: Option<f32>,
+        lambda: f32,
+        min_child_weight: f32,
+    ) -> Option<SplitInfo> {
+        let global_rate = prior.unwrap_or(0.01) as f64;
+        best_split_positive_mass(
+            histograms,
+            lambda,
+            min_child_weight,
+            self.alpha as f64,
+            self.min_pos_leaf as f64,
+            self.lcb_z as f64,
+            self.tiny_leaf_penalty as f64,
+            global_rate,
+        )
+    }
+}
+
+fn best_split_positive_mass(
+    histograms: &[Histogram],
+    lambda: f32,
+    min_child_weight: f32,
+    alpha: f64,
+    min_pos_leaf: f64,
+    lcb_z: f64,
+    tiny_leaf_penalty: f64,
+    global_rate: f64,
+) -> Option<SplitInfo> {
+    let mut best: Option<SplitInfo> = None;
+
+    for hist in histograms {
+        let n_bins = hist.bins.len();
+        if n_bins < 2 {
+            continue;
+        }
+
+        let total = hist.total();
+        let (tot_g, tot_h) = (total.sum_g, total.sum_h);
+        let total_pos = total.count_pos as f64;
+
+        let mut left_g = 0.0_f32;
+        let mut left_h = 0.0_f32;
+        let mut left_count = 0u32;
+        let mut left_count_pos = 0u32;
+
+        for b in 0..n_bins - 1 {
+            let bin = &hist.bins[b];
+            left_g += bin.sum_g;
+            left_h += bin.sum_h;
+            left_count += bin.count;
+            left_count_pos += bin.count_pos;
+
+            let right_h = tot_h - left_h;
+            let right_g = tot_g - left_g;
+            let right_count = total.count - left_count;
+            let right_count_pos = total.count_pos - left_count_pos;
+
+            if left_h < min_child_weight || right_h < min_child_weight {
+                continue;
+            }
+            if left_count == 0 || right_count == 0 {
+                continue;
+            }
+
+            let std_gain = newton_gain(tot_g, tot_h, left_g, left_h, right_g, right_h, lambda);
+
+            // pm_gain is normalised by total node positives so α is scale-invariant.
+            let pm_gain = positive_mass_gain(
+                left_count_pos as f64,
+                left_count as f64,
+                right_count_pos as f64,
+                right_count as f64,
+                total_pos,
+                global_rate,
+                min_pos_leaf,
+                lcb_z,
+            );
+
+            // Optional penalty for children with 1..min_pos_leaf positives.
+            // These children don't contribute pm_gain but still represent
+            // fragmented positive mass.  Zero by default.
+            let tiny_penalty = if tiny_leaf_penalty > 0.0 {
+                let lp = left_count_pos as f64;
+                let rp = right_count_pos as f64;
+                let lpen = if lp > 0.0 && lp < min_pos_leaf { tiny_leaf_penalty * (lp / total_pos.max(1.0)) } else { 0.0 };
+                let rpen = if rp > 0.0 && rp < min_pos_leaf { tiny_leaf_penalty * (rp / total_pos.max(1.0)) } else { 0.0 };
+                lpen + rpen
+            } else {
+                0.0
+            };
+
+            let score = std_gain as f64 + alpha * pm_gain - tiny_penalty;
+
+            if best.as_ref().map_or(true, |bs| score as f32 > bs.gain) {
+                best = Some(SplitInfo {
+                    feature: hist.feature,
+                    split_bin: b as u8,
+                    gain: score as f32,
+                    class_purity_delta: 0.0,
+                    left_sum_g: left_g,
+                    left_sum_h: left_h,
+                    left_count,
+                    right_sum_g: right_g,
+                    right_sum_h: right_h,
+                    right_count,
+                });
+            }
+        }
+    }
+
+    best.filter(|s| s.gain > 0.0)
 }
 
 // ── Shared scan ──────────────────────────────────────────────────────────────

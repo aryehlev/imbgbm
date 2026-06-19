@@ -6,8 +6,8 @@ use imbgbm_core::Dataset;
 use imbgbm_infer::Model;
 use imbgbm_loss::{BCELoss, FocalLoss};
 use imbgbm_sample::{AdaptiveSampler, GossSampler, Sampler, UniformSampler};
-use imbgbm_split::StandardSplitter;
-use imbgbm_train::{train, Config};
+use imbgbm_split::{PositiveMassSplitter, Splitter, StandardSplitter, VarianceAwareSplitter};
+use imbgbm_train::{train, Config, TailWeightConfig};
 
 #[derive(Parser)]
 #[command(name = "imbgbm", about = "Imbalance-aware gradient boosted trees")]
@@ -76,6 +76,32 @@ enum Commands {
         /// Mutually exclusive with --platt; isotonic takes precedence when both set.
         #[arg(long)]
         raw_isotonic: bool,
+        /// Splitter: standard | variance-aware | positive-mass
+        #[arg(long, default_value = "standard")]
+        splitter: String,
+        /// Purity bonus coefficient for variance-aware splitter.
+        #[arg(long, default_value_t = 0.1_f32)]
+        purity_lambda: f32,
+        /// Alpha coefficient for positive-mass splitter (positive-mass gain weight).
+        #[arg(long, default_value_t = 1.0_f32)]
+        pm_alpha: f32,
+        /// Minimum positives per leaf for positive-mass splitter.
+        #[arg(long, default_value_t = 20_f32)]
+        pm_min_pos_leaf: f32,
+        /// Enable top-K tail gradient weighting (focuses learning on top-K boundary).
+        #[arg(long)]
+        tail_weight: bool,
+        /// Top fraction of rows to target for tail weighting (e.g. 0.01 = top 1%).
+        #[arg(long, default_value_t = 0.01_f64)]
+        tail_top_rate: f64,
+        /// Round at which tail weighting activates (0 = from round 1).
+        #[arg(long, default_value_t = 0_usize)]
+        tail_start_round: usize,
+        /// Comma-separated 0-based column indices for integer-encoded categorical features.
+        /// Example: "6,7,8" for the last three columns.  These receive OOF Bayesian
+        /// target encoding so no leakage occurs during training.
+        #[arg(long, default_value = "")]
+        cat_features: String,
     },
     /// Predict probabilities for a feature CSV (no label column, no header).
     Predict {
@@ -116,7 +142,9 @@ fn main() {
         Commands::Train {
             input, output, loss, n_rounds, learning_rate, max_depth,
             subsample, sampler, gamma, alpha, calibrate, platt, fold_strategy, seed,
-            early_stopping_rounds, col_subsample, lambda, min_samples_leaf, min_child_weight, raw_isotonic,
+            early_stopping_rounds, col_subsample, lambda, min_samples_leaf, min_child_weight,
+            raw_isotonic, splitter, purity_lambda, pm_alpha, pm_min_pos_leaf,
+            tail_weight, tail_top_rate, tail_start_round, cat_features,
         } => {
             let (features, labels) = load_csv_with_label(&input);
             let rows: Vec<&[f32]> = features.iter().map(|r| r.as_slice()).collect();
@@ -135,6 +163,31 @@ fn main() {
                 _ => FoldStrategy::Random { seed },
             };
 
+            let splitter_arc: Arc<dyn Splitter> = match splitter.as_str() {
+                "variance-aware" => Arc::new(VarianceAwareSplitter::new(purity_lambda, 5)),
+                "positive-mass"  => Arc::new(
+                    PositiveMassSplitter::new(pm_alpha, pm_min_pos_leaf)
+                ),
+                _ => Arc::new(StandardSplitter),
+            };
+
+            let cat_feature_indices: Vec<usize> = if cat_features.is_empty() {
+                vec![]
+            } else {
+                cat_features.split(',')
+                    .map(|s| s.trim().parse::<usize>().expect("invalid --cat-features index"))
+                    .collect()
+            };
+
+            let tail_weight_cfg = if tail_weight {
+                let mut tw = TailWeightConfig::top1pct();
+                tw.top_rate    = tail_top_rate;
+                tw.start_round = tail_start_round;
+                Some(tw)
+            } else {
+                None
+            };
+
             let config = Config {
                 n_rounds,
                 learning_rate,
@@ -150,10 +203,12 @@ fn main() {
                 metadata: None,
                 objective,
                 sampler: build_sampler(&sampler, subsample, seed),
-                splitter: Arc::new(StandardSplitter),
+                splitter: splitter_arc,
                 early_stopping_rounds: if early_stopping_rounds == 0 { None } else { Some(early_stopping_rounds) },
                 platt_scale: platt,
                 raw_isotonic,
+                tail_weight: tail_weight_cfg,
+                cat_features: cat_feature_indices,
                 seed,
             };
 

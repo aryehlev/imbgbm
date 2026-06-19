@@ -2,11 +2,17 @@ use imbgbm_calib::{assign_folds, calibrate_tree, calibrate_tree_with_oof, fit_pl
 use imbgbm_core::{BinnedDataset, BoostingState, Dataset, RowMetadata};
 use imbgbm_infer::{route_all, Model, RawIsoCal};
 
-use crate::{builder::grow_tree, config::Config};
+use crate::{builder::grow_tree, config::{Config, TailWeightConfig}};
 
 /// Train an imbgbm model.
 pub fn train(dataset: &Dataset, config: &Config) -> Model {
-    let binned = BinnedDataset::from_dataset(dataset, config.n_bins);
+    let (binned, cat_encodings) = if config.cat_features.is_empty() {
+        (BinnedDataset::from_dataset(dataset, config.n_bins), vec![])
+    } else {
+        BinnedDataset::from_dataset_with_cats(
+            dataset, config.n_bins, &config.cat_features, config.k_folds, config.seed,
+        )
+    };
     let n_rows = binned.n_rows;
 
     // Resolve metadata: use the config-supplied one or an empty default.
@@ -50,6 +56,20 @@ pub fn train(dataset: &Dataset, config: &Config) -> Model {
         let (g, h) = config.objective.grad_hess(&binned.labels, &state.predictions);
         state.gradients = g;
         state.hessians = h;
+
+        // ── 1b. Top-tail gradient weighting ─────────────────────────────────
+        // Upweight examples near the deployment threshold (top-K boundary) and
+        // suppress easy negatives.  Applied by scaling gradients and hessians
+        // so the histogram-building step naturally focuses on the ranking margin.
+        if let Some(ref tw) = config.tail_weight {
+            if round >= tw.start_round {
+                let weights = tail_weights(&binned.labels, &state.predictions, tw);
+                for i in 0..n_rows {
+                    state.gradients[i] *= weights[i];
+                    state.hessians[i] *= weights[i];
+                }
+            }
+        }
 
         // ── 2. Sampling (returns indices + IPC weights) ──────────────────────
         let sample = config.sampler.sample(
@@ -141,6 +161,10 @@ pub fn train(dataset: &Dataset, config: &Config) -> Model {
 
     let mut model = Model::new(trees, config.learning_rate, init_score);
 
+    if !cat_encodings.is_empty() {
+        model.cat_encodings = cat_encodings;
+    }
+
     // Fit Platt scaling on OOF boosted scores (preserves additive structure).
     if want_platt {
         let (a, b) = fit_platt(&oof_predictions, &binned.labels);
@@ -204,6 +228,8 @@ fn collect_kfold_raw_oof_scores(dataset: &Dataset, config: &Config) -> Vec<f32> 
             col_subsample:          config.col_subsample,
             platt_scale:            false,
             raw_isotonic:           false,
+            tail_weight:            config.tail_weight.clone(),
+            cat_features:           config.cat_features.clone(),
             seed:                   config.seed.wrapping_add(fold as u64 * 0x9e3779b9u64),
         };
 
@@ -218,6 +244,46 @@ fn collect_kfold_raw_oof_scores(dataset: &Dataset, config: &Config) -> Vec<f32> 
     }
 
     oof_scores
+}
+
+/// Compute per-row weights for top-tail gradient focusing.
+///
+/// Finds the raw-score threshold τ for the top `cfg.top_rate` fraction, then
+/// assigns weights based on each row's class and position relative to τ:
+///
+/// - Positive below τ (missed positive):  `weight_missed_pos`
+/// - Negative above τ (false positive):   `weight_false_pos`
+/// - Either class within `boundary_width` of τ: `weight_boundary`
+/// - Negative far below τ (easy negative): `weight_easy_neg`
+/// - Positive far above τ (easy positive): `weight_easy_pos`
+fn tail_weights(labels: &[f32], scores: &[f32], cfg: &TailWeightConfig) -> Vec<f32> {
+    let n = scores.len();
+    let mut sorted = scores.to_vec();
+    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let threshold_idx = ((1.0 - cfg.top_rate) * n as f64) as usize;
+    let tau = sorted[threshold_idx.min(n.saturating_sub(1))];
+
+    labels
+        .iter()
+        .zip(scores.iter())
+        .map(|(&y, &s)| {
+            let is_pos = y > 0.5;
+            let in_top = s >= tau;
+            let near_boundary = (s - tau).abs() < cfg.boundary_width;
+
+            if is_pos && !in_top {
+                cfg.weight_missed_pos
+            } else if !is_pos && in_top {
+                cfg.weight_false_pos
+            } else if near_boundary {
+                cfg.weight_boundary
+            } else if !is_pos {
+                cfg.weight_easy_neg
+            } else {
+                cfg.weight_easy_pos
+            }
+        })
+        .collect()
 }
 
 fn mean_log_loss(labels: &[f32], preds: &[f32]) -> f32 {
